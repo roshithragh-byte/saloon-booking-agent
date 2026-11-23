@@ -1,4 +1,4 @@
-# Aura — AI WhatsApp Salon Booking Agent
+# Aura — AI WhatsApp Booking Agent
 
 > **Production-grade AI WhatsApp booking concierge for Natural’s Unisex Salon, Kottakkal.**  
 > Powered by a **Deterministic Hybrid Architecture** combining native WhatsApp interactive UI, real-time Google Calendar synchronization, customer memory, and dual LLM inference (NVIDIA primary with automatic Google Gemini fallback).
