@@ -1,182 +1,93 @@
-# Jasper's Market WhatsApp Bot
+# Aura — AI WhatsApp Salon Booking Agent
 
-Jasper's Market is a fictional grocery brand created to showcase key features of the WhatsApp Business Platform. The bot leverages key features to deliver a great customer experience. Using this demo as inspiration, you can create a delightful WhatsApp experience that leverages both automation and live customer support.
+> **Production-grade AI WhatsApp booking concierge for Natural’s Unisex Salon, Kottakkal.**  
+> Powered by a **Deterministic Hybrid Architecture** combining native WhatsApp interactive UI, real-time Google Calendar synchronization, customer memory, and dual LLM inference (NVIDIA primary with automatic Google Gemini fallback).
 
-[Access the WhatsApp experience](https://wa.me/15558813169?text=Get+started)
+---
 
-## Source attribution
+## ✨ Features
 
-Keep the existing link above for the Developer Docs QR placement. It prefills `Get started`, which the application attributes to `developer_docs`. For simplified DevX onboarding, [use this link](https://wa.me/15558813169?text=Try%20it%20out) to prefill `Try it out`, which is attributed to `simplified_devx_onboarding`.
+- **Zero-Turn Customer Identification:** Automatically recognizes returning customers by WhatsApp phone number and profile name.
+- **Appointment History & Status Check:** Answers questions like *"Any upcoming appointment for me?"* by querying actual bookings.
+- **Native WhatsApp UI (Zero Numbered Ambiguity):** Replaces brittle numbered text lists with native WhatsApp Interactive Lists and Quick Reply Buttons containing exact canonical IDs (e.g. `srv_mens_precision`).
+- **Duration-Aware Calendar Availability:** Checks Google Calendar free/busy availability bounded by exact service duration (e.g. 30 min classic cut vs 90 min balayage).
+- **Interactive Review & Confirmation Card:** Presents clean WhatsApp interactive button card (`[Confirm Booking ✅]` / `[Change Details ✏️]`).
+- **Transactional Booking Execution:** Strictly books on Google Calendar only upon explicit customer confirmation.
+- **Dual AI Provider Architecture:**
+  - **Primary:** NVIDIA API (`nvidia/nemotron-3.5-bolt-e4b`)
+  - **Fallback:** Google Gemini (`gemini-3.5-flash-lite`, `gemini-4-hydrogen`, `gemini-3.8-flash`)
 
-The application writes one JSON event to stdout after the user sends either recognized phrase. AppRunner forwards stdout to CloudWatch Logs. Matching is case-sensitive after trimming surrounding whitespace. Other messages, including edited phrases and older tokenized formats, do not produce attribution events.
+---
 
-The event name is `entry_source_attributed`. Its fields are `schema_version`, `source_surface`, `inbound_message_id`, `receiver_phone_number_id`, and `event_timestamp`. The event does not include the sender phone number or raw message text. This measures attributed conversation starts, not QR scans or link opens.
-
-WhatsApp can retry the same webhook, so use `inbound_message_id` to deduplicate events instead of adding Redis state to the message path. This CloudWatch Logs Insights query returns one row per inbound WAMID while retaining the delivery count:
-
-```text
-fields @timestamp, event_timestamp, source_surface,
-       inbound_message_id, receiver_phone_number_id
-| filter event_name = "entry_source_attributed"
-| stats latest(@timestamp) as last_seen,
-        count(*) as webhook_delivery_count,
-        latest(event_timestamp) as event_timestamp,
-        latest(source_surface) as source_surface,
-        latest(receiver_phone_number_id) as receiver_phone_number_id
-  by inbound_message_id
-| sort last_seen desc
-```
-
-See the [Developer Documentation on this experience](https://developers.facebook.com/documentation/business-messaging/whatsapp/overview).
-
-# Setting up your WhatsApp App
-
-## Requirements
-
-- **Meta Developer Account:** Required to create new apps, which are the core of any Meta integration. You can create a new developer account by going to the [Meta Developers website](https://developers.facebook.com/) and clicking the "Get Started" button.
-- **Meta App:** Contains the settings for your WhatsApp automation, including access tokens. To create a new app, visit your [app dashboard](https://developers.facebook.com/apps).
-- **Meta Business:** This is a pre-requisite for building with WhatsApp. If you don't have a business, you can create one in the app creation flow.
-- **WhatsApp Business Account:** This is needed to send and receive messages in WhatsApp. To create a new WhatsApp Business account, visit [Meta Business Suite](https://business.facebook.com/latest).
-
-## Setup Steps
-
-Before you begin, make sure you have completed all of the requirements listed above. At this point you should have a Business and a registered Meta App.
-
-#### Get the App id, App Secret, App Token, and Waba id
-
-1. Go to your app Basic Settings, [Find your app here](https://developers.facebook.com/apps)
-2. Save the **App ID** number and the **App Secret**
-3. Go to your Business in Meta Business Suite and find your desired WhatsApp Business Account under the WhatsApp tab.
-4. Save the **Waba ID**
-5. Create a system user token for your app. Save this **App token**. [Find instructions here](https://developers.facebook.com/documentation/business-messaging/whatsapp/get-started#1--acquire-an-access-token-using-a-system-user-or-facebook-login)
-
-#### Grant WhatsApp access to your developer app
-
-1. Go to your app Dashboard
-2. Under _Add Product_ find _WhatsApp_ and click _Set Up_
-3. Now you should be in the App's WhatsApp Settings.
-4. Navigate to the _Configuration_ tab.
-
-# Installation
-
-Clone this repository on your local machine:
-
-```bash
-$ git clone git@github.com:fbsamples/whatsapp-business-jaspers-market.git
-$ cd whatsapp-business-jaspers-market
-```
-
-You will need:
-
-- [Node](https://nodejs.org/en/) 18.19 or higher
-- Remote server service, a local tunneling service such as [ngrok](https://ngrok.com/), or your own webserver.
-
-# Usage
-
-## Using ngrok
-
-#### 1. Setup templates
-In order for the app to send templated messages, you need to first create those templates under your WhatsApp Business Account. You can either do this by running `./template.sh` or through [WhatsApp Manager](https://business.facebook.com/latest/whatsapp_manager/message_templates).
-
-#### 2. Upload runtime media
-
-Template example handles are only used while creating templates. Runtime sends require media IDs uploaded for the phone number that sends the messages.
-
-Upload each image used by the templates through the WhatsApp Cloud API media endpoint for your sender phone number. Save the returned IDs as `GROCERIES_MEDIA_ID`, `STRAWBERRIES_MEDIA_ID`, `SHEET_PAN_DINNER_MEDIA_ID`, and `SALAD_BOWL_MEDIA_ID` in `.env`. Use assets that you own and do not use Asset Manager URLs or the upload-session handles printed by `template.sh` as runtime media IDs.
-
-Media IDs are scoped to the phone number that uploaded them and expire after 30 days. Re-upload your assets, update all four environment variables, and restart the application before they expire.
-
-#### 3. Install Redis
-If not already installed, install redis via [download](https://redis.io/docs/latest/operate/oss_and_stack/install/install-stack/).
-
-You can then start a redis daemon locally via command line:
-
-```bash
-redis-server --daemonize yes
-```
-
-#### 4. Install tunneling service
-
-If not already installed, install ngrok via [download](https://ngrok.com/download) or via command line:
-
-```bash
-npm install -g ngrok
-```
-
-In the directory of this repo, request a tunnel to your local server with your preferred port
-```bash
-ngrok http 8080
-```
-
-The screen should show the ngrok status:
+## 🛠️ Project Structure
 
 ```
-Session Status                online
-Account                       Redacted (Plan: Free)
-Version                       2.3.35
-Region                        United States (us)
-Web Interface                 http://127.0.0.1:4040
-Forwarding                    http://1c3b838deacb.ngrok.io -> http://localhost:3000
-Forwarding                    https://1c3b838deacb.ngrok.io -> http://localhost:3000
-
-Connections                   ttl     opn     rt1     rt5     p50     p90
-                              0       0       0.00    0.00    0.00    0.00
-```
-Note the https URL of the external server that is forwarded to your local machine. In the above example, it is `https://1c3b838deacb.ngrok.io`.
-
-#### 5. Install the dependencies
-
-Open a new terminal tab, also in the repo directory.
-
-```bash
-$ npm install
+├── app.js                      # Express server & Webhook / OAuth routes
+├── data/
+│   └── salon-config.json       # Service catalog, pricing, durations & staff
+├── services/
+│   ├── ai-agent.js             # Dual-provider LLM orchestrator (NVIDIA + Gemini)
+│   ├── booking-store.js        # Customer store & duration-aware slot calculator
+│   ├── calendar.js             # Google Calendar API integration & OAuth2 client
+│   ├── config.js               # Environment configuration & validation
+│   ├── conversation.js         # Aura v2 Deterministic State Machine
+│   ├── graph-api.js            # WhatsApp Cloud API client (text, lists, buttons)
+│   └── message.js              # Inbound WhatsApp webhook payload normalizer
+├── test/
+│   └── v2-audit.test.js        # Automated 12-scenario verification test suite
+└── .sample.env                 # Environment variables template
 ```
 
-Alternatively, you can use [Yarn](https://yarnpkg.com/en/):
+---
 
-```bash
-$ yarn install
-```
+## 🚀 Getting Started
 
-#### 6. Set up .env file
+### 1. Prerequisites
+- Node.js >= 20.x
+- A Meta Developer Account with WhatsApp Cloud API configured
+- A Google Cloud Project with Google Calendar API enabled (OAuth Client ID)
+- An NVIDIA API Key and/or Google Gemini API Key
 
-Copy the file `.sample.env` to `.env`
-
+### 2. Setup Environment Variables
+Copy `.sample.env` to `.env`:
 ```bash
 cp .sample.env .env
 ```
+Fill in your credentials:
+```env
+ACCESS_TOKEN=your_whatsapp_access_token
+APP_SECRET=your_meta_app_secret
+APP_ID=your_meta_app_id
+VERIFY_TOKEN=your_custom_webhook_verify_token
 
-Edit the `.env` file to add all saved credentials and the four media IDs returned by the WhatsApp Cloud API media endpoint. `VERIFY_TOKEN` is a passphrase you create for the webhook subscription handshake. The application refuses to start when a media ID is missing, blank, or still set to the example value `1234567890`.
+NVIDIA_API_KEY=nvapi-your_nvidia_key
+GEMINI_API_KEY=AIzaSy_your_gemini_key
 
-#### 7. Run your app locally
-
-```bash
-node app.js
+PORT=8080
 ```
 
-#### 8. Configure your webhook subscription
+### 3. Google Calendar OAuth2 Setup
+1. Download your OAuth client secret JSON from Google Cloud Console into project root as `oauth-credentials.json`.
+2. Start the app:
+   ```bash
+   npm start
+   ```
+3. Visit `http://localhost:8080/auth/google` in your browser and authorize your calendar account.
+4. `token.json` will be automatically generated and persisted for offline calendar access.
 
-Use the `VERIFY_TOKEN` that you created in `.env` file and subscribe your webhook server's URL for WhatsApp webhooks in your developer page's _Configuration_ tab. Make sure to subscribe to the messages field. Note that the app listens to webhooks on the `/webhook` endpoint.
+### 4. Expose Webhook
+Expose port 8080 using `ngrok` or `ssh`:
+```bash
+ngrok http 8080
+```
+Set Callback URL in Meta Dashboard: `https://<your-subdomain>/webhook` and verify with your `VERIFY_TOKEN`. Subscribe to the `messages` webhook field.
 
-#### 9. Test that your app setup is successful
-
-Send a message to your WhatsApp Business Account from a consumer WhatsApp number.
-
-You should see the webhook called in the ngrok terminal tab, and in your application terminal tab.
-
-If you see a response to your message in WhatsApp, you have fully set up your app! Voilà!
-
-Exercise all three reply buttons and verify the grocery image, strawberry image, and both recipe carousel images render. Run the unit tests with:
-
+### 5. Running Automated Tests
 ```bash
 npm test
 ```
 
-## License
+---
 
-Sample WhatsApp App Jasper's Market is Apache 2.0 licensed, as found in the LICENSE file.
-
-See the [CONTRIBUTING](CONTRIBUTING.md) file for how to help out.
-
-Terms of Use - https://opensource.facebook.com/legal/terms
-Privacy Policy - https://opensource.facebook.com/legal/privacy
+## 📄 License
+MIT

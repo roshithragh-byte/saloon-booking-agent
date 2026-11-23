@@ -16,6 +16,7 @@ const express = require('express');
 const config = require('./services/config');
 const Conversation = require('./services/conversation');
 const Message = require('./services/message');
+const calendarService = require('./services/calendar');
 const app = express();
 
 // Parse application/x-www-form-urlencoded
@@ -76,11 +77,46 @@ app.post('/webhook', (req, res) => {
 // Default route for health check
 app.get('/', (req, res) => {
   res.json({
-    message: 'Jasper\'s Market Server is running',
+    message: 'Aura Luxe Salon AI Agent is running',
+    calendarAuthorized: calendarService.isAuthorized(),
     endpoints: [
-      'POST /webhook - WhatsApp webhook endpoint'
+      'POST /webhook - WhatsApp webhook endpoint',
+      'GET /auth/google - Connect Google Calendar',
+      'GET /oauth2callback - Google OAuth callback'
     ]
   });
+});
+
+// Start Google Calendar OAuth Flow
+app.get('/auth/google', (req, res) => {
+  try {
+    const authUrl = calendarService.generateAuthUrl();
+    res.redirect(authUrl);
+  } catch (err) {
+    res.status(500).send(`Error starting Google Auth: ${err.message}`);
+  }
+});
+
+// OAuth Callback handler from Google
+app.get('/oauth2callback', async (req, res) => {
+  const code = req.query.code;
+  if (!code) {
+    return res.status(400).send('No authorization code provided by Google.');
+  }
+
+  try {
+    await calendarService.saveTokenFromCode(code);
+    res.send(`
+      <div style="font-family: sans-serif; text-align: center; margin-top: 50px;">
+        <h2 style="color: #2e7d32;">✅ Google Calendar Connected Successfully!</h2>
+        <p>Your WhatsApp Salon Agent can now view real-time open slots and insert bookings onto your Google Calendar.</p>
+        <p>You can close this tab and start chatting on WhatsApp!</p>
+      </div>
+    `);
+  } catch (err) {
+    console.error('Error saving Google token:', err);
+    res.status(500).send(`Failed to exchange token: ${err.message}`);
+  }
 });
 
 // Check if all environment variables are set

@@ -1,91 +1,80 @@
 /**
- * Copyright 2021-present, Facebook, Inc. All rights reserved.
- *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree.
+ * Aura State Machine & Orchestrator v2
+ * Handles deterministic state transitions, native WhatsApp UI menus, and customer profile lookup
  */
-
 "use strict";
 
-const constants = require("./constants");
-const config = require("./config");
-const Attribution = require('./attribution');
 const GraphApi = require('./graph-api');
 const Message = require('./message');
-const Status = require('./status');
-const Cache = require('./redis');
+const SalonAIAgent = require('./ai-agent');
+const bookingStore = require('./booking-store');
 
+// Deduplication cache
+const processedMessageIds = new Set();
 
-function sendTryOutDemoMessage(messageId, senderPhoneNumberId, recipientPhoneNumber, messageBody) {
-  return GraphApi.messageWithInteractiveReply(
-    messageId,
-    senderPhoneNumberId,
-    recipientPhoneNumber,
-    messageBody,
-    [
-      {
-        id: constants.REPLY_INTERACTIVE_MEDIA_ID,
-        title: constants.REPLY_INTERACTIVE_WITH_MEDIA_CTA,
-      },
-      {
-        id: constants.REPLY_MEDIA_CAROUSEL_ID,
-        title: constants.REPLY_MEDIA_CARD_CAROUSEL_CTA,
-      },
-      {
-        id: constants.REPLY_OFFER_ID,
-        title: constants.REPLY_OFFER_CTA,
+// Persistent in-memory session states: phone -> Session Object
+const userSessions = new Map();
+
+function getOrCreateSession(phone, senderProfileName) {
+  if (!userSessions.has(phone)) {
+    const customer = bookingStore.getOrCreateCustomer(phone, senderProfileName);
+    userSessions.set(phone, {
+      phone,
+      state: "IDENTIFIED",
+      customerName: customer.name,
+      history: [],
+      bookingDraft: {
+        serviceId: null,
+        serviceName: null,
+        durationMin: null,
+        price: null,
+        date: null,
+        time: null,
+        staffName: null
       }
-    ]
-  );
+    });
+  }
+  const session = userSessions.get(phone);
+  if (senderProfileName && session.customerName === "Valued Guest") {
+    session.customerName = senderProfileName;
+    bookingStore.updateCustomerName(phone, senderProfileName);
+  }
+  return session;
 }
 
-function sendInteractiveMediaMessage(messageId, senderPhoneNumberId, recipientPhoneNumber) {
-  return GraphApi.messageWithUtilityTemplate(
-    messageId,
-    senderPhoneNumberId,
-    recipientPhoneNumber,
-    {
-      templateName: "grocery_delivery_utility",
-      locale: "en_US",
-      imageId: config.groceriesMediaId,
-    }
-  );
+function updateHistory(session, userText, modelReply) {
+  session.history.push({ role: "user", parts: [{ text: userText }] });
+  session.history.push({ role: "model", parts: [{ text: modelReply }] });
+  if (session.history.length > 20) {
+    session.history = session.history.slice(-20);
+  }
 }
 
-function sendLimitedTimeOfferMessage(messageId, senderPhoneNumberId, recipientPhoneNumber) {
-  return GraphApi.messageWithLimitedTimeOfferTemplate(
-    messageId,
-    senderPhoneNumberId,
-    recipientPhoneNumber,
-    {
-      templateName: "strawberries_limited_offer",
-      locale: "en_US",
-      imageId: config.strawberriesMediaId,
-      offerCode: "BERRIES20",
-    }
-  );
+// Helpers to extract explicit date
+function extractDateFromText(text) {
+  const lower = text.toLowerCase();
+  const today = new Date();
+  
+  if (lower.includes("today")) {
+    return today.toISOString().split("T")[0];
+  }
+  if (lower.includes("tomorrow")) {
+    const tomorrow = new Date(today.getTime() + 86400000);
+    return tomorrow.toISOString().split("T")[0];
+  }
+  // Match YYYY-MM-DD
+  const matchIso = text.match(/\b(202\d-\d{2}-\d{2})\b/);
+  if (matchIso) return matchIso[1];
+
+  return null;
 }
 
-function sendMediaCarouselMessage(messageId, senderPhoneNumberId, recipientPhoneNumber) {
-  return GraphApi.messageWithMediaCardCarousel(
-    messageId,
-    senderPhoneNumberId,
-    recipientPhoneNumber,
-    {
-      templateName: "recipe_media_carousel",
-      locale: "en_US",
-      imageIds: [
-        config.sheetPanDinnerMediaId,
-        config.saladBowlMediaId,
-      ]
-    }
-  );
+// Helpers to extract name if user explicitly says "My name is Duke"
+function extractNameFromText(text) {
+  const match = text.match(/(?:my name is|name is|i am|call me|name:?)\s+([a-zA-Z\s]{2,25})/i);
+  if (match) return match[1].trim();
+  return null;
 }
-
-async function markMessageForFollowUp(messageId) {
-  await Cache.insert(messageId);
-}
-
 
 module.exports = class Conversation {
   constructor(phoneNumberId) {
@@ -94,61 +83,356 @@ module.exports = class Conversation {
 
   static async handleMessage(senderPhoneNumberId, rawMessage) {
     const message = new Message(rawMessage);
-    Attribution.logAttributionEvent(message, senderPhoneNumberId);
 
-    switch (message.type) {
-      case constants.REPLY_INTERACTIVE_MEDIA_ID:
-        let interactiveMediaResponse = await sendInteractiveMediaMessage(
-          message.id,
-          senderPhoneNumberId,
-          message.senderPhoneNumber
-        );
-        await markMessageForFollowUp(interactiveMediaResponse.messages[0].id);
-        break;
-      case constants.REPLY_MEDIA_CAROUSEL_ID:
-        let mediaCarouselResponse = await sendMediaCarouselMessage(
-          message.id,
-          senderPhoneNumberId,
-          message.senderPhoneNumber
-        );
-        await markMessageForFollowUp(mediaCarouselResponse.messages[0].id);
-        break;
-      case constants.REPLY_OFFER_ID:
-        let ltoResponse = await sendLimitedTimeOfferMessage(
-          message.id,
-          senderPhoneNumberId,
-          message.senderPhoneNumber
-        );
-        await markMessageForFollowUp(ltoResponse.messages[0].id);
-        break;
-      default:
-        sendTryOutDemoMessage(
-          message.id,
-          senderPhoneNumberId,
-          message.senderPhoneNumber,
-          constants.APP_DEFAULT_MESSAGE
-        );
-        break;
-    }
-  }
-
-  static async handleStatus(senderPhoneNumberId, rawStatus) {
-    const status = new Status(rawStatus);
-
-    // Only handle delivered and read statuses
-    if (!(status.status === 'delivered' || status.status === 'read')) {
+    // Ignore events without content
+    if (!message.textBody && message.type !== 'interactive_button' && message.type !== 'interactive_list') {
       return;
     }
 
-    // Only send a follow up message if the current message is flagged
-    // as needing one in the cache.
-    if (await Cache.remove(status.messageId)) {
-      await sendTryOutDemoMessage(
-        undefined,
+    // Prevent duplicate webhook execution
+    if (message.id) {
+      if (processedMessageIds.has(message.id)) {
+        console.log(`Duplicate webhook ${message.id} ignored.`);
+        return;
+      }
+      processedMessageIds.add(message.id);
+      setTimeout(() => processedMessageIds.delete(message.id), 10 * 60 * 1000);
+    }
+
+    const customerPhone = message.senderPhoneNumber;
+    const rawProfileName = rawMessage._contactName || null;
+    const session = getOrCreateSession(customerPhone, rawProfileName);
+    const userPrompt = (message.textBody || "").trim();
+    const interactiveId = message.interactiveId || null;
+
+    console.log(`[Session: ${customerPhone}] State: ${session.state} | Input: "${userPrompt}" | ID: ${interactiveId}`);
+
+    // Check if user explicitly corrected or mentioned their name
+    const detectedName = extractNameFromText(userPrompt);
+    if (detectedName) {
+      session.customerName = detectedName;
+      bookingStore.updateCustomerName(customerPhone, detectedName);
+    }
+
+    try {
+      // -------------------------------------------------------------
+      // 1. DIRECT ACTION: User tapped an interactive button
+      // -------------------------------------------------------------
+      if (interactiveId) {
+        // Confirmation button pressed
+        if (interactiveId === "btn_confirm_booking") {
+          return await this.#executeBookingConfirmation(senderPhoneNumberId, customerPhone, session, message.id);
+        }
+
+        // Edit button pressed
+        if (interactiveId === "btn_edit_booking") {
+          session.state = "AWAITING_SERVICE_SELECT";
+          session.bookingDraft = { serviceId: null, serviceName: null, date: null, time: null };
+          return await this.#sendCategoryDisambiguation(senderPhoneNumberId, customerPhone, message.id);
+        }
+
+        // Category chosen (cat_...)
+        if (interactiveId.startsWith("cat_")) {
+          return await this.#sendServicesList(senderPhoneNumberId, customerPhone, interactiveId, message.id);
+        }
+
+        // Exact Service chosen (srv_... or cmb_...)
+        if (interactiveId.startsWith("srv_") || interactiveId.startsWith("cmb_")) {
+          return await this.#handleServiceSelected(senderPhoneNumberId, customerPhone, session, interactiveId, message.id);
+        }
+
+        // Exact Time Slot chosen (slot_...)
+        if (interactiveId.startsWith("slot_")) {
+          const chosenSlot = interactiveId.replace("slot_", "").replace(/_/g, " ");
+          return await this.#handleSlotSelected(senderPhoneNumberId, customerPhone, session, chosenSlot, message.id);
+        }
+      }
+
+      // -------------------------------------------------------------
+      // 2. INTENT: Check existing appointments ("any appointment for me?")
+      // -------------------------------------------------------------
+      const lower = userPrompt.toLowerCase();
+      if (
+        lower.includes("appointment") && (lower.includes("any") || lower.includes("my") || lower.includes("upcoming") || lower.includes("check") || lower.includes("status"))
+      ) {
+        const upcoming = bookingStore.getCustomerUpcomingAppointments(customerPhone);
+        if (upcoming.length > 0) {
+          const cards = upcoming.map(u => 
+            `🏷️ *Booking ID:* ${u.id}\n✂️ *Service:* ${u.serviceName}\n📅 *Date & Time:* ${u.date} at ${u.time}\n👤 *Stylist:* ${u.staffName}\n📍 *Status:* Confirmed`
+          ).join("\n\n");
+          
+          await GraphApi.sendTextMessage(
+            message.id,
+            senderPhoneNumberId,
+            customerPhone,
+            `Hello ${session.customerName}! ✨ Here is your upcoming appointment at Natural’s Unisex Salon:\n\n${cards}\n\nNeed to reschedule or book another service? Just let me know!`
+          );
+          return;
+        } else {
+          await GraphApi.sendTextMessage(
+            message.id,
+            senderPhoneNumberId,
+            customerPhone,
+            `Hello ${session.customerName}! ✨ You don't have any upcoming appointments scheduled right now.\n\nWould you like to book a fresh haircut, skin treatment, or signature combo?`
+          );
+          return;
+        }
+      }
+
+      // -------------------------------------------------------------
+      // 3. INTENT: Direct Service Disambiguation ("I want a haircut", "book haircut")
+      // -------------------------------------------------------------
+      if (lower.includes("haircut") || lower.includes("hair cut") || lower.includes("styling")) {
+        session.state = "DISAMBIGUATING_CATEGORY";
+        return await this.#sendCategoryDisambiguation(senderPhoneNumberId, customerPhone, message.id);
+      }
+
+      // Check if user picked an exact service by typing name
+      const matchedItem = bookingStore.findItemByName(userPrompt);
+      if (matchedItem) {
+        return await this.#handleServiceSelected(senderPhoneNumberId, customerPhone, session, matchedItem.id, message.id);
+      }
+
+      // -------------------------------------------------------------
+      // 4. STATE: AWAITING_DATE (User selected a service, now providing date)
+      // -------------------------------------------------------------
+      if (session.state === "AWAITING_DATE" || (session.bookingDraft.serviceId && !session.bookingDraft.date)) {
+        const parsedDate = extractDateFromText(userPrompt);
+        if (parsedDate) {
+          session.bookingDraft.date = parsedDate;
+          session.state = "AWAITING_TIME_SLOT";
+          return await this.#sendTimeSlotMenu(senderPhoneNumberId, customerPhone, session, message.id);
+        }
+      }
+
+      // -------------------------------------------------------------
+      // 5. NATURAL LANGUAGE AGENT TURN
+      // -------------------------------------------------------------
+      const customer = bookingStore.getOrCreateCustomer(customerPhone, session.customerName);
+      const upcoming = bookingStore.getCustomerUpcomingAppointments(customerPhone);
+      
+      const replyText = await SalonAIAgent.generateReply({
+        userMessage: userPrompt,
+        history: session.history,
+        customerProfile: customer,
+        upcomingBookings: upcoming
+      });
+
+      updateHistory(session, userPrompt, replyText);
+
+      await GraphApi.sendTextMessage(
+        message.id,
         senderPhoneNumberId,
-        status.recipientPhoneNumber,
-        constants.APP_TRY_ANOTHER_MESSAGE
+        customerPhone,
+        replyText
+      );
+
+    } catch (err) {
+      console.error("Error processing conversation:", err);
+      await GraphApi.sendTextMessage(
+        message.id,
+        senderPhoneNumberId,
+        customerPhone,
+        "I'm sorry, I encountered a temporary connection issue with our salon system. Please try again in a moment."
       );
     }
   }
+
+  // --- UI Action Handlers ---
+
+  static async #sendCategoryDisambiguation(senderPhoneNumberId, customerPhone, messageId) {
+    const buttons = [
+      { id: "cat_mens_hair", title: "Men's Cuts & Beard" },
+      { id: "cat_ladies_hair", title: "Ladies Haircuts" },
+      { id: "cat_combos", title: "Signature Combos" }
+    ];
+
+    await GraphApi.sendInteractiveButtons(
+      messageId,
+      senderPhoneNumberId,
+      customerPhone,
+      "Certainly! ✂️ What type of styling are you looking for today?",
+      buttons,
+      "Natural's Unisex Salon"
+    );
+  }
+
+  static async #sendServicesList(senderPhoneNumberId, customerPhone, categoryId, messageId) {
+    const services = bookingStore.getServicesByCategory(categoryId);
+    const category = bookingStore.getCategories().find(c => c.id === categoryId);
+
+    const rows = services.slice(0, 10).map(s => ({
+      id: s.id,
+      title: s.name.substring(0, 24),
+      description: `${s.priceFormatted} · ${s.durationMin} mins`
+    }));
+
+    const sections = [{ title: (category ? category.title : "Services").substring(0, 24), rows }];
+
+    await GraphApi.sendInteractiveList(
+      messageId,
+      senderPhoneNumberId,
+      customerPhone,
+      "Please tap below to select your exact service:",
+      "View Services",
+      sections,
+      "Natural's Unisex Salon"
+    );
+  }
+
+  static async #handleServiceSelected(senderPhoneNumberId, customerPhone, session, itemId, messageId) {
+    const item = bookingStore.findItemById(itemId);
+    if (!item) return;
+
+    session.bookingDraft.serviceId = item.id;
+    session.bookingDraft.serviceName = item.name;
+    session.bookingDraft.durationMin = item.durationMin;
+    session.bookingDraft.price = item.priceFormatted;
+    session.bookingDraft.staffName = item.eligibleStaff ? item.eligibleStaff[0] : "Senior Stylist";
+
+    // If date is already chosen, jump directly to time slot selection
+    if (session.bookingDraft.date) {
+      session.state = "AWAITING_TIME_SLOT";
+      return await this.#sendTimeSlotMenu(senderPhoneNumberId, customerPhone, session, messageId);
+    }
+
+    session.state = "AWAITING_DATE";
+    const today = new Date().toISOString().split("T")[0];
+    const tomorrow = new Date(Date.now() + 86400000).toISOString().split("T")[0];
+
+    const buttons = [
+      { id: `date_${today}`, title: "Today" },
+      { id: `date_${tomorrow}`, title: "Tomorrow" }
+    ];
+
+    await GraphApi.sendInteractiveButtons(
+      messageId,
+      senderPhoneNumberId,
+      customerPhone,
+      `You selected *${item.name}* (${item.priceFormatted} · ${item.durationMin} mins) ✨\n\nWhich day would you like to visit us? (Or type any specific date like 2026-11-26)`,
+      buttons,
+      "Select Appointment Day"
+    );
+  }
+
+  static async #sendTimeSlotMenu(senderPhoneNumberId, customerPhone, session, messageId) {
+    const { serviceId, durationMin, date } = session.bookingDraft;
+    const availableSlots = await bookingStore.getAvailableSlotsForService(serviceId, date);
+
+    if (!availableSlots || availableSlots.length === 0) {
+      await GraphApi.sendTextMessage(
+        messageId,
+        senderPhoneNumberId,
+        customerPhone,
+        `All slots are currently booked for ${date}. Would you like to check tomorrow or another day?`
+      );
+      return;
+    }
+
+    const rows = availableSlots.slice(0, 10).map(slot => ({
+      id: `slot_${slot.replace(/ /g, "_")}`,
+      title: slot,
+      description: `${durationMin || 45} mins session`
+    }));
+
+    const sections = [{ title: `Slots: ${date}`.substring(0, 24), rows }];
+
+    await GraphApi.sendInteractiveList(
+      messageId,
+      senderPhoneNumberId,
+      customerPhone,
+      `Here are the available openings on *${date}* for your *${session.bookingDraft.serviceName}*:`,
+      "Choose Time Slot",
+      sections,
+      "Available Time Slots"
+    );
+  }
+
+  static async #handleSlotSelected(senderPhoneNumberId, customerPhone, session, slotTime, messageId) {
+    session.bookingDraft.time = slotTime;
+    session.state = "AWAITING_CONFIRMATION";
+
+    const draft = session.bookingDraft;
+    const summaryCard = [
+      `👤 *Guest Name:* ${session.customerName}`,
+      `✂️ *Service:* ${draft.serviceName}`,
+      `📅 *Date:* ${draft.date}`,
+      `🕒 *Time:* ${draft.time} (${draft.durationMin} mins)`,
+      `💳 *Price:* ${draft.price}`,
+      `📍 *Salon:* Natural's Unisex Salon, Kottakkal`
+    ].join("\n");
+
+    const buttons = [
+      { id: "btn_confirm_booking", title: "Confirm Booking ✅" },
+      { id: "btn_edit_booking", title: "Change Details ✏️" }
+    ];
+
+    await GraphApi.sendInteractiveButtons(
+      messageId,
+      senderPhoneNumberId,
+      customerPhone,
+      `Please review your appointment summary:\n\n${summaryCard}`,
+      buttons,
+      "Review Your Appointment"
+    );
+  }
+
+  static async #executeBookingConfirmation(senderPhoneNumberId, customerPhone, session, messageId) {
+    const draft = session.bookingDraft;
+    if (!draft.serviceName || !draft.date || !draft.time) {
+      await GraphApi.sendTextMessage(
+        messageId,
+        senderPhoneNumberId,
+        customerPhone,
+        "It looks like some appointment details were incomplete. Let's restart your booking selection."
+      );
+      session.state = "IDENTIFIED";
+      return;
+    }
+
+    session.state = "BOOKING_IN_PROGRESS";
+
+    // Atomically create booking and sync with Google Calendar
+    const confirmedBooking = await bookingStore.createBooking({
+      customerPhone,
+      customerName: session.customerName,
+      serviceId: draft.serviceId,
+      serviceName: draft.serviceName,
+      durationMin: draft.durationMin,
+      price: draft.price,
+      staffName: draft.staffName,
+      date: draft.date,
+      time: draft.time
+    });
+
+    session.state = "BOOKED";
+
+    const receiptMessage = [
+      `✨ *Booking Confirmed!* ✨`,
+      ``,
+      `Thank you, *${confirmedBooking.customerName}*! Your appointment has been scheduled on our calendar.`,
+      ``,
+      `🏷️ *Booking ID:* ${confirmedBooking.id}`,
+      `✂️ *Service:* ${confirmedBooking.serviceName}`,
+      `📅 *Date:* ${confirmedBooking.date}`,
+      `🕒 *Time:* ${confirmedBooking.time} (${confirmedBooking.durationMin} mins)`,
+      `👤 *Assigned Stylist:* ${confirmedBooking.staffName}`,
+      `💳 *Total:* ${confirmedBooking.price}`,
+      `📍 *Location:* ${confirmedBooking.location}`,
+      ``,
+      `We look forward to pampering you! See you soon. 💖`
+    ].join("\n");
+
+    // Reset draft for next interactions
+    session.bookingDraft = { serviceId: null, serviceName: null, date: null, time: null };
+
+    await GraphApi.sendTextMessage(
+      messageId,
+      senderPhoneNumberId,
+      customerPhone,
+      receiptMessage
+    );
+  }
+
+  static async handleStatus() {}
 };

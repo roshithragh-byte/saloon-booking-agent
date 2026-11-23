@@ -18,9 +18,19 @@ module.exports = class Message {
 
     let type = rawMessage.type;
     if (type === 'interactive') {
-      this.type = rawMessage.interactive.button_reply.id;
+      if (rawMessage.interactive?.type === 'button_reply') {
+        this.type = 'interactive_button';
+        this.interactiveId = rawMessage.interactive.button_reply.id;
+        this.textBody = rawMessage.interactive.button_reply.title;
+      } else if (rawMessage.interactive?.type === 'list_reply') {
+        this.type = 'interactive_list';
+        this.interactiveId = rawMessage.interactive.list_reply.id;
+        this.textBody = rawMessage.interactive.list_reply.title;
+      } else {
+        this.type = 'interactive';
+      }
     } else {
-      this.type = 'unknown'
+      this.type = type;
     }
 
     this.senderPhoneNumber = rawMessage.from;

@@ -15,8 +15,6 @@ const ENV_VARS = [
   "ACCESS_TOKEN",
   "APP_SECRET",
   "VERIFY_TOKEN",
-  "REDIS_HOST",
-  "REDIS_PORT"
 ];
 
 const MEDIA_ID_ENV_VARS = [
@@ -37,6 +35,8 @@ module.exports = Object.freeze({
   appSecret: process.env.APP_SECRET,
   accessToken: process.env.ACCESS_TOKEN,
   verifyToken: process.env.VERIFY_TOKEN,
+  geminiApiKey: process.env.GEMINI_API_KEY,
+  nvidiaApiKey: process.env.NVIDIA_API_KEY,
 
   // WhatsApp media uploaded for outbound templates
   groceriesMediaId: getMediaId("GROCERIES_MEDIA_ID"),
@@ -55,21 +55,8 @@ module.exports = Object.freeze({
         console.warn("WARNING: Missing the environment variable " + key);
       }
     });
-
-    const invalidMediaIds = MEDIA_ID_ENV_VARS.filter(function (key) {
-      const normalizedValue = getMediaId(key);
-      return (
-        !normalizedValue ||
-        normalizedValue === MEDIA_ID_PLACEHOLDER ||
-        normalizedValue === "ADD_" + key + "_HERE"
-      );
-    });
-
-    if (invalidMediaIds.length > 0) {
-      throw new Error(
-        "Missing or invalid media ID environment variables: " +
-          invalidMediaIds.join(", ")
-      );
+    if (!process.env.GEMINI_API_KEY) {
+      console.warn("WARNING: Missing GEMINI_API_KEY. AI conversation features will be disabled until set.");
     }
   }
 });
