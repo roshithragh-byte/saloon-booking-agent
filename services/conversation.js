@@ -15,13 +15,13 @@ const processedMessageIds = new Set();
 // Persistent in-memory session states: phone -> Session Object
 const userSessions = new Map();
 
-function getOrCreateSession(phone, senderProfileName) {
+async function getOrCreateSession(phone, senderProfileName) {
   if (!userSessions.has(phone)) {
-    const customer = bookingStore.getOrCreateCustomer(phone, senderProfileName);
+    const customer = await bookingStore.getOrCreateCustomer(phone, senderProfileName);
     userSessions.set(phone, {
       phone,
       state: "IDENTIFIED",
-      customerName: customer.name,
+      customerName: customer ? customer.name : (senderProfileName || "Valued Guest"),
       history: [],
       bookingDraft: {
         serviceId: null,
@@ -37,7 +37,7 @@ function getOrCreateSession(phone, senderProfileName) {
   const session = userSessions.get(phone);
   if (senderProfileName && session.customerName === "Valued Guest") {
     session.customerName = senderProfileName;
-    bookingStore.updateCustomerName(phone, senderProfileName);
+    await bookingStore.updateCustomerName(phone, senderProfileName);
   }
   return session;
 }
@@ -101,7 +101,7 @@ module.exports = class Conversation {
 
     const customerPhone = message.senderPhoneNumber;
     const rawProfileName = rawMessage._contactName || null;
-    const session = getOrCreateSession(customerPhone, rawProfileName);
+    const session = await getOrCreateSession(customerPhone, rawProfileName);
     const userPrompt = (message.textBody || "").trim();
     const interactiveId = message.interactiveId || null;
 
@@ -111,7 +111,7 @@ module.exports = class Conversation {
     const detectedName = extractNameFromText(userPrompt);
     if (detectedName) {
       session.customerName = detectedName;
-      bookingStore.updateCustomerName(customerPhone, detectedName);
+      await bookingStore.updateCustomerName(customerPhone, detectedName);
     }
 
     try {
@@ -155,7 +155,7 @@ module.exports = class Conversation {
       if (
         lower.includes("appointment") && (lower.includes("any") || lower.includes("my") || lower.includes("upcoming") || lower.includes("check") || lower.includes("status"))
       ) {
-        const upcoming = bookingStore.getCustomerUpcomingAppointments(customerPhone);
+        const upcoming = await bookingStore.getCustomerUpcomingAppointments(customerPhone);
         if (upcoming.length > 0) {
           const cards = upcoming.map(u => 
             `🏷️ *Booking ID:* ${u.id}\n✂️ *Service:* ${u.serviceName}\n📅 *Date & Time:* ${u.date} at ${u.time}\n👤 *Stylist:* ${u.staffName}\n📍 *Status:* Confirmed`
@@ -208,8 +208,8 @@ module.exports = class Conversation {
       // -------------------------------------------------------------
       // 5. NATURAL LANGUAGE AGENT TURN
       // -------------------------------------------------------------
-      const customer = bookingStore.getOrCreateCustomer(customerPhone, session.customerName);
-      const upcoming = bookingStore.getCustomerUpcomingAppointments(customerPhone);
+      const customer = await bookingStore.getOrCreateCustomer(customerPhone, session.customerName);
+      const upcoming = await bookingStore.getCustomerUpcomingAppointments(customerPhone);
       
       const replyText = await SalonAIAgent.generateReply({
         userMessage: userPrompt,

@@ -48,7 +48,7 @@ test('Aura v2 Architecture Verification', async (t) => {
       text: { body: 'Hello, my name is Duke' }
     });
 
-    const customer = bookingStore.getOrCreateCustomer(TEST_PHONE);
+    const customer = await bookingStore.getOrCreateCustomer(TEST_PHONE);
     assert.equal(customer.name, 'Duke', 'Customer name must be persisted as Duke');
 
     // 2. Query upcoming appointments when none exist

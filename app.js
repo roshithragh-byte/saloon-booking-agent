@@ -18,7 +18,11 @@ const Conversation = require('./services/conversation');
 const Message = require('./services/message');
 const calendarService = require('./services/calendar');
 const bookingStore = require('./services/booking-store');
+const db = require('./services/db');
 const app = express();
+
+// Initialize database schema on startup
+db.initDatabase();
 
 // Parse application/x-www-form-urlencoded
 app.use(
@@ -92,8 +96,8 @@ app.get('/', (req, res) => {
 });
 
 // Receptionist CRM Portal - Real-time appointments view
-app.get('/crm', (req, res) => {
-  const appointments = bookingStore.getAllAppointments();
+app.get('/crm', async (req, res) => {
+  const appointments = await bookingStore.getAllAppointments();
   const services = bookingStore.getAllServices();
   const combos = bookingStore.getCombosList();
   const staff = bookingStore.getStaffList();
@@ -238,10 +242,11 @@ app.post('/crm/walkin', async (req, res) => {
 });
 
 // JSON API endpoint for external CRMs or dashboards
-app.get('/crm/appointments', (req, res) => {
+app.get('/crm/appointments', async (req, res) => {
+  const all = await bookingStore.getAllAppointments();
   res.json({
-    total: bookingStore.getAllAppointments().length,
-    appointments: bookingStore.getAllAppointments()
+    total: all.length,
+    appointments: all
   });
 });
 
