@@ -19,13 +19,26 @@ class GoogleCalendarService {
   }
 
   initClient() {
-    if (!fs.existsSync(CREDENTIALS_PATH)) {
-      console.warn("⚠️ oauth-credentials.json not found in project root.");
+    let credentials = null;
+
+    // 1. Check environment variable first (for Cloud Run / production)
+    if (process.env.GOOGLE_OAUTH_CREDENTIALS) {
+      try {
+        credentials = JSON.parse(process.env.GOOGLE_OAUTH_CREDENTIALS);
+      } catch (e) {
+        console.error("Failed to parse GOOGLE_OAUTH_CREDENTIALS environment variable:", e.message);
+      }
+    } else if (fs.existsSync(CREDENTIALS_PATH)) {
+      // 2. Fallback to local file (for local dev)
+      const content = fs.readFileSync(CREDENTIALS_PATH, 'utf8');
+      credentials = JSON.parse(content);
+    }
+
+    if (!credentials) {
+      console.warn("⚠️ Google OAuth credentials not found in env (GOOGLE_OAUTH_CREDENTIALS) or file (oauth-credentials.json).");
       return;
     }
 
-    const content = fs.readFileSync(CREDENTIALS_PATH, 'utf8');
-    const credentials = JSON.parse(content);
     const { client_secret, client_id, redirect_uris } = credentials.web || credentials.installed;
 
     this.oAuth2Client = new google.auth.OAuth2(
@@ -34,12 +47,24 @@ class GoogleCalendarService {
       redirect_uris[0]
     );
 
-    if (fs.existsSync(TOKEN_PATH)) {
-      const token = fs.readFileSync(TOKEN_PATH, 'utf8');
-      this.oAuth2Client.setCredentials(JSON.parse(token));
+    // Load Token: env var first, then token.json file
+    let token = null;
+    if (process.env.GOOGLE_TOKEN) {
+      try {
+        token = JSON.parse(process.env.GOOGLE_TOKEN);
+      } catch (e) {
+        console.error("Failed to parse GOOGLE_TOKEN environment variable:", e.message);
+      }
+    } else if (fs.existsSync(TOKEN_PATH)) {
+      const tokenContent = fs.readFileSync(TOKEN_PATH, 'utf8');
+      token = JSON.parse(tokenContent);
+    }
+
+    if (token) {
+      this.oAuth2Client.setCredentials(token);
       console.log("✅ Google Calendar OAuth token loaded successfully.");
     } else {
-      console.warn("⚠️ token.json not found. Please visit /auth/google to connect your Google Calendar.");
+      console.warn("⚠️ token not found in env (GOOGLE_TOKEN) or file (token.json). Please visit /auth/google to connect your Google Calendar.");
     }
   }
 
@@ -62,7 +87,10 @@ class GoogleCalendarService {
   }
 
   isAuthorized() {
-    return Boolean(this.oAuth2Client && fs.existsSync(TOKEN_PATH));
+    return Boolean(
+      this.oAuth2Client && 
+      (Boolean(process.env.GOOGLE_TOKEN) || fs.existsSync(TOKEN_PATH))
+    );
   }
 
   getCalendar() {

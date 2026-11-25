@@ -118,6 +118,15 @@ module.exports = {
     return calendarService.getAvailableSlots(date, durationMin);
   },
 
+  getAllAppointments() {
+    return appointments;
+  },
+
+  getTodayAppointments() {
+    const today = new Date().toISOString().split('T')[0];
+    return appointments.filter(app => app.date === today && app.status !== "cancelled");
+  },
+
   async createBooking(booking) {
     const id = "NU-" + Math.floor(1000 + Math.random() * 9000);
 
