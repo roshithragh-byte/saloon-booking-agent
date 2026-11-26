@@ -20,29 +20,25 @@ module.exports = class GraphApi {
       "Content-Type": "application/json"
     };
 
-    // Mark as read
-    if (messageId) {
-      try {
-        await fetch(`${GRAPH_API_BASE}/${senderPhoneNumberId}/messages`, {
-          method: "POST",
-          headers,
-          body: JSON.stringify({
-            messaging_product: "whatsapp",
-            status: "read",
-            message_id: messageId
-          })
-        });
-      } catch (err) {
-        console.warn("Could not mark message as read:", err.message);
-      }
-    }
-
     // Send the actual message
     const res = await fetch(`${GRAPH_API_BASE}/${senderPhoneNumberId}/messages`, {
       method: "POST",
       headers,
       body: JSON.stringify(requestBody)
     });
+
+    // Mark as read in the background without blocking response latency
+    if (messageId) {
+      fetch(`${GRAPH_API_BASE}/${senderPhoneNumberId}/messages`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          messaging_product: "whatsapp",
+          status: "read",
+          message_id: messageId
+        })
+      }).catch(err => console.warn("Could not mark message as read:", err.message));
+    }
 
     const data = await res.json();
     if (!res.ok) {

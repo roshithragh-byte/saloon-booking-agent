@@ -194,7 +194,27 @@ module.exports = class Conversation {
       }
 
       // -------------------------------------------------------------
-      // 4. STATE: AWAITING_DATE (User selected a service, now providing date)
+      // 4. STATE: AWAITING_NAME (Capturing customer's real name before final confirmation)
+      // -------------------------------------------------------------
+      if (session.state === "AWAITING_NAME") {
+        const cleanedName = userPrompt.replace(/[^\w\s]/gi, '').trim();
+        if (cleanedName.length >= 2) {
+          session.customerName = cleanedName;
+          await bookingStore.updateCustomerName(customerPhone, cleanedName);
+          return await this.#presentConfirmationCard(senderPhoneNumberId, customerPhone, session, message.id);
+        } else {
+          await GraphApi.sendTextMessage(
+            message.id,
+            senderPhoneNumberId,
+            customerPhone,
+            "Please provide a valid name for the reservation so our receptionist can greet you:"
+          );
+          return;
+        }
+      }
+
+      // -------------------------------------------------------------
+      // 5. STATE: AWAITING_DATE (User selected a service, now providing date)
       // -------------------------------------------------------------
       if (session.state === "AWAITING_DATE" || (session.bookingDraft.serviceId && !session.bookingDraft.date)) {
         const parsedDate = extractDateFromText(userPrompt);
@@ -350,11 +370,29 @@ module.exports = class Conversation {
 
   static async #handleSlotSelected(senderPhoneNumberId, customerPhone, session, slotTime, messageId) {
     session.bookingDraft.time = slotTime;
+
+    // Check if customer name is still generic ("Valued Guest")
+    if (!session.customerName || session.customerName.toLowerCase() === "valued guest") {
+      session.state = "AWAITING_NAME";
+      await GraphApi.sendTextMessage(
+        messageId,
+        senderPhoneNumberId,
+        customerPhone,
+        `Great! Slot *${slotTime}* on *${session.bookingDraft.date}* is locked in. ✂️\n\nMay I have your **Full Name** to put on the appointment reservation?`
+      );
+      return;
+    }
+
+    return await this.#presentConfirmationCard(senderPhoneNumberId, customerPhone, session, messageId);
+  }
+
+  static async #presentConfirmationCard(senderPhoneNumberId, customerPhone, session, messageId) {
     session.state = "AWAITING_CONFIRMATION";
 
     const draft = session.bookingDraft;
     const summaryCard = [
       `👤 *Guest Name:* ${session.customerName}`,
+      `📞 *Phone Number:* +${customerPhone}`,
       `✂️ *Service:* ${draft.serviceName}`,
       `📅 *Date:* ${draft.date}`,
       `🕒 *Time:* ${draft.time} (${draft.durationMin} mins)`,

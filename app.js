@@ -67,6 +67,10 @@ app.post('/webhook', (req, res) => {
 
           if (value.messages) {
             value.messages.forEach(rawMessage => {
+              // Extract WhatsApp profile contact name if provided by Meta
+              if (value.contacts && value.contacts.length > 0) {
+                rawMessage._contactName = value.contacts[0].profile?.name || null;
+              }
               // Respond to message
               Conversation.handleMessage(senderPhoneNumberId, rawMessage);
             });
