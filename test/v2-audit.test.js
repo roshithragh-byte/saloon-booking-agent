@@ -105,7 +105,7 @@ test('Aura v2 Architecture Verification', async (t) => {
     });
 
     assert.equal(lastOutbound.type, 'buttons');
-    assert.match(lastOutbound.text, /Men's Precision Cut/);
+    assert.match(lastOutbound.text, /Duke/);
   });
 
   await t.test('Test 6 & 7: Service-specific duration availability check', async () => {

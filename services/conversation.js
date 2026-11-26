@@ -194,14 +194,27 @@ module.exports = class Conversation {
       }
 
       // -------------------------------------------------------------
-      // 4. STATE: AWAITING_NAME (Capturing customer's real name before final confirmation)
+      // 4. STATE: AWAITING_NAME (Capturing customer's real name before choosing day/time)
       // -------------------------------------------------------------
       if (session.state === "AWAITING_NAME") {
         const cleanedName = userPrompt.replace(/[^\w\s]/gi, '').trim();
         if (cleanedName.length >= 2) {
           session.customerName = cleanedName;
           await bookingStore.updateCustomerName(customerPhone, cleanedName);
-          return await this.#presentConfirmationCard(senderPhoneNumberId, customerPhone, session, message.id);
+
+          // If a slot was already chosen, go directly to confirmation
+          if (session.bookingDraft.time && session.bookingDraft.date) {
+            return await this.#presentConfirmationCard(senderPhoneNumberId, customerPhone, session, message.id);
+          }
+
+          // If date was already chosen, show time slots
+          if (session.bookingDraft.date) {
+            session.state = "AWAITING_TIME_SLOT";
+            return await this.#sendTimeSlotMenu(senderPhoneNumberId, customerPhone, session, message.id);
+          }
+
+          // Otherwise proceed to day selection menu
+          return await this.#sendDaySelectionMenu(senderPhoneNumberId, customerPhone, session, message.id);
         } else {
           await GraphApi.sendTextMessage(
             message.id,
@@ -310,12 +323,29 @@ module.exports = class Conversation {
     session.bookingDraft.price = item.priceFormatted;
     session.bookingDraft.staffName = item.eligibleStaff ? item.eligibleStaff[0] : "Senior Stylist";
 
-    // If date is already chosen, jump directly to time slot selection
+    // 1. Mandatory Name Check: If customer name is unknown or default, ask for it immediately
+    const isNameUnknown = !session.customerName || session.customerName.toLowerCase() === "valued guest";
+    if (isNameUnknown) {
+      session.state = "AWAITING_NAME";
+      await GraphApi.sendTextMessage(
+        messageId,
+        senderPhoneNumberId,
+        customerPhone,
+        `You selected *${item.name}* (${item.priceFormatted} · ${item.durationMin} mins) ✨\n\nBefore picking your preferred time, may I have your **Full Name** for the appointment reservation?`
+      );
+      return;
+    }
+
+    // 2. If name is already known and date is already chosen, jump directly to time slot selection
     if (session.bookingDraft.date) {
       session.state = "AWAITING_TIME_SLOT";
       return await this.#sendTimeSlotMenu(senderPhoneNumberId, customerPhone, session, messageId);
     }
 
+    return await this.#sendDaySelectionMenu(senderPhoneNumberId, customerPhone, session, messageId);
+  }
+
+  static async #sendDaySelectionMenu(senderPhoneNumberId, customerPhone, session, messageId) {
     session.state = "AWAITING_DATE";
     const today = new Date().toISOString().split("T")[0];
     const tomorrow = new Date(Date.now() + 86400000).toISOString().split("T")[0];
@@ -329,7 +359,7 @@ module.exports = class Conversation {
       messageId,
       senderPhoneNumberId,
       customerPhone,
-      `You selected *${item.name}* (${item.priceFormatted} · ${item.durationMin} mins) ✨\n\nWhich day would you like to visit us? (Or type any specific date like 2026-11-26)`,
+      `Thanks, *${session.customerName}*! ✨\n\nWhich day would you like to visit us? (Or type any specific date like 2026-11-27)`,
       buttons,
       "Select Appointment Day"
     );
