@@ -327,6 +327,11 @@ config.checkEnvVariables();
 // Verify that the callback came from Meta Facebook.
 // Rejects missing signatures and uses timing-safe comparison to prevent timing attacks.
 function verifyRequestSignature(req, res, buf) {
+  // Only verify signature for Meta webhook endpoints; allow CRM and internal routes without Meta signature
+  if (!req.originalUrl.startsWith("/webhook")) {
+    return;
+  }
+
   // Allow health checks or local testing when appSecret is deliberately empty
   if (!config.appSecret) {
     return;
