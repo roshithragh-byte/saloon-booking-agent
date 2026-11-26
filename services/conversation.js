@@ -107,7 +107,8 @@ function updateHistory(session, userText, modelReply) {
 
 // Helpers
 function extractDateFromText(text) {
-  const lower = text.toLowerCase();
+  if (!text) return null;
+  const lower = text.toLowerCase().trim();
   const today = new Date();
   
   if (lower.includes("today")) {
@@ -117,20 +118,54 @@ function extractDateFromText(text) {
     const tomorrow = new Date(today.getTime() + 86400000);
     return tomorrow.toISOString().split("T")[0];
   }
-  const matchIso = text.match(/\b(202\d-\d{2}-\d{2})\b/);
-  if (matchIso) return matchIso[1];
+
+  // 1. ISO format: YYYY-MM-DD
+  const matchIso = text.match(/\b(202\d-\d{1,2}-\d{1,2})\b/);
+  if (matchIso) {
+    const [y, m, d] = matchIso[1].split("-");
+    return `${y}-${m.padStart(2, "0")}-${d.padStart(2, "0")}`;
+  }
+
+  // 2. DD/MM/YYYY or DD-MM-YYYY
+  const matchDmy = text.match(/\b(\d{1,2})[\/\-](\d{1,2})[\/\-](202\d)\b/);
+  if (matchDmy) {
+    const [, d, m, y] = matchDmy;
+    return `${y}-${m.padStart(2, "0")}-${d.padStart(2, "0")}`;
+  }
+
+  // 3. DD Month YYYY (e.g. 28 November 2026 or 28th Nov 2026)
+  const monthMap = {
+    jan: "01", january: "01", feb: "02", february: "02",
+    mar: "03", march: "03", apr: "04", april: "04",
+    may: "05", jun: "06", june: "06", jul: "07", july: "07",
+    aug: "08", august: "08", sep: "09", september: "09",
+    oct: "10", october: "10", nov: "11", november: "11",
+    dec: "12", december: "12"
+  };
+  const matchTextDate = text.match(/\b(\d{1,2})(?:st|nd|rd|th)?\s+([a-zA-Z]+)(?:\s+(202\d))?\b/i);
+  if (matchTextDate) {
+    const day = matchTextDate[1].padStart(2, "0");
+    const monthStr = matchTextDate[2].toLowerCase();
+    const year = matchTextDate[3] || today.getFullYear().toString();
+    if (monthMap[monthStr]) {
+      return `${year}-${monthMap[monthStr]}-${day}`;
+    }
+  }
 
   return null;
 }
 
 function extractTimeFromText(text) {
-  const match = text.match(/\b((?:0?[1-9]|1[0-2])(?::[0-5][0-9])?\s*(?:am|pm))\b/i);
+  if (!text) return null;
+  // Match 11:30 AM, 11:30AM, 11.00 AM, 11.00AM, 11am, 3pm
+  const match = text.match(/\b((?:0?[1-9]|1[0-2])(?::|\.)?([0-5][0-9])?\s*(am|pm))\b/i);
   if (match) {
-    let t = match[1].toUpperCase();
-    if (!t.includes(":")) {
-      t = t.replace(/(AM|PM)/, ":00 $1");
-    }
-    return t;
+    const raw = match[1].toUpperCase();
+    const modifier = match[3].toUpperCase();
+    let [hours, minutes] = raw.replace(modifier, "").trim().split(/[:\.]/);
+    hours = hours.padStart(2, "0");
+    minutes = (minutes || "00").padStart(2, "0");
+    return `${hours}:${minutes} ${modifier}`;
   }
   return null;
 }
@@ -323,21 +358,38 @@ module.exports = class Conversation {
       }
 
       // -------------------------------------------------------------------
-      // 5. STEP 3: SERVICE DISCOVERY BY TYPED NAME
+      // 5. STEP 3: SERVICE DISCOVERY BY TYPED NAME OR MENU REQUEST
       // -------------------------------------------------------------------
-      const matchedItem = bookingStore.findItemByName(userPrompt);
+      // If user asks to see services, menu, catalog, or combos
+      if (
+        lower.includes("menu") || 
+        lower.includes("catalog") || 
+        lower.includes("services") || 
+        lower.includes("combos") || 
+        lower.includes("packages")
+      ) {
+        if (!session.gender) {
+          return await this.#promptGenderSelection(senderPhoneNumberId, customerPhone, message.id);
+        } else {
+          return await this.#sendGenderCatalogList(senderPhoneNumberId, customerPhone, session, message.id);
+        }
+      }
+
+      const matchedItem = bookingStore.findItemByName(userPrompt, session.gender);
       if (matchedItem) {
         return await this.#handleServiceChosen(senderPhoneNumberId, customerPhone, session, matchedItem.id, message.id);
       }
 
       // If user typed "men" or "women" when in service step
-      if (session.state === "AWAITING_SERVICE") {
-        if (lower.includes("men") || lower.includes("male") || lower.includes("boy")) {
+      if (session.state === "AWAITING_SERVICE" || session.state === "AWAITING_SERVICE_SELECT") {
+        if (lower.includes("men") || lower.includes("male") || lower.includes("boy") || lower.includes("gents")) {
           session.gender = "men";
+          session.state = "AWAITING_SERVICE_SELECT";
           return await this.#sendGenderCatalogList(senderPhoneNumberId, customerPhone, session, message.id);
         }
         if (lower.includes("women") || lower.includes("female") || lower.includes("lady") || lower.includes("ladies")) {
           session.gender = "women";
+          session.state = "AWAITING_SERVICE_SELECT";
           return await this.#sendGenderCatalogList(senderPhoneNumberId, customerPhone, session, message.id);
         }
       }
@@ -381,20 +433,40 @@ module.exports = class Conversation {
 
   static async #promptDateSelection(senderPhoneNumberId, customerPhone, session, messageId) {
     session.state = "AWAITING_DATE";
-    const today = new Date().toISOString().split("T")[0];
-    const tomorrow = new Date(Date.now() + 86400000).toISOString().split("T")[0];
 
-    const buttons = [
-      { id: `date_${today}`, title: "Today" },
-      { id: `date_${tomorrow}`, title: "Tomorrow" }
-    ];
+    // 7 consecutive days starting from today
+    const rows = [];
+    const daysOfWeek = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
-    await GraphApi.sendInteractiveButtons(
+    for (let i = 0; i < 7; i++) {
+      const d = new Date(Date.now() + i * 86400000);
+      const iso = d.toISOString().split("T")[0];
+      const dayName = daysOfWeek[d.getDay()];
+      const monthName = months[d.getMonth()];
+      const dateNum = d.getDate();
+
+      let title = "";
+      if (i === 0) title = `Today (${dayName}, ${dateNum} ${monthName})`;
+      else if (i === 1) title = `Tomorrow (${dayName}, ${dateNum} ${monthName})`;
+      else title = `${dayName}, ${dateNum} ${monthName}`;
+
+      rows.push({
+        id: `date_${iso}`,
+        title: title.substring(0, 24),
+        description: `Book for ${iso}`
+      });
+    }
+
+    const sections = [{ title: "Select Appointment Date", rows }];
+
+    await GraphApi.sendInteractiveList(
       messageId,
       senderPhoneNumberId,
       customerPhone,
-      "Which day would you like to visit us? 📅\n(You can also type any date, e.g. 2026-11-28)",
-      buttons,
+      "Please select which day you would like to visit Natural’s Unisex Salon 📅\n(You can also type any specific date):",
+      "Choose Date",
+      sections,
       "Step 2: Select Date"
     );
   }

@@ -116,10 +116,38 @@ module.exports = {
     return null;
   },
 
-  findItemByName(name) {
+  findItemByName(name, gender = null) {
     if (!name) return null;
     const cleanName = name.trim().toLowerCase();
 
+    // 1. Alias mapping for common shorthand inputs
+    const comboAliases = [
+      { keys: ["combo 1", "combo1", "executive grooming"], id: "cmb_mens_executive" },
+      { keys: ["combo 2", "combo2", "scalp style", "scalp & style"], id: "cmb_mens_scalp_style" },
+      { keys: ["combo 3", "combo3", "ladies signature", "signature revival"], id: "cmb_ladies_signature_revival" },
+      { keys: ["combo 4", "combo4", "radiance skin", "skin ritual"], id: "cmb_radiance_skin_ritual" },
+      { keys: ["combo 5", "combo5", "hair botox", "keratin bundle"], id: "cmb_frizz_free_botox_bundle" },
+      { keys: ["combo 6", "combo6", "pre-bridal", "bridal glow", "groom glow"], id: "cmb_pre_bridal_groom_glow" }
+    ];
+
+    for (const ca of comboAliases) {
+      if (ca.keys.some(k => cleanName.includes(k))) {
+        return this.findItemById(ca.id);
+      }
+    }
+
+    // Common service shorthand
+    if (cleanName.includes("mens haircut") || cleanName.includes("men haircut") || cleanName === "haircut") {
+      return this.findItemById("srv_mens_precision");
+    }
+    if (cleanName.includes("ladies haircut") || cleanName.includes("women haircut")) {
+      return this.findItemById("srv_ladies_straight_cut");
+    }
+    if (cleanName.includes("hydra facial") || cleanName === "facial") {
+      return this.findItemById("srv_hydra_facial_signature");
+    }
+
+    // 2. Direct name substring matching
     const service = salonConfig.services.find(s => 
       s.name.toLowerCase() === cleanName ||
       cleanName.includes(s.name.toLowerCase()) ||

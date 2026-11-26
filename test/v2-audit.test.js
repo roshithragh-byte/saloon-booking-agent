@@ -61,8 +61,9 @@ test('Aura 4-Stage Sequential Booking Flow Verification', async (t) => {
     const customer = await bookingStore.getOrCreateCustomer(TEST_PHONE);
     assert.equal(customer.name, 'Duke Sharma');
 
-    assert.equal(lastOutbound.type, 'buttons');
-    assert.match(lastOutbound.header, /Step 2/i, 'Must prompt for Step 2 Date');
+    assert.equal(lastOutbound.type, 'list');
+    assert.match(lastOutbound.header, /Step 2: Select Date/i, 'Must prompt for Step 2 Date List');
+    assert.equal(lastOutbound.sections[0].rows.length, 7, 'Must offer 7 consecutive days');
   });
 
   await t.test('Step 2: Customer selects Date -> Prompts for Time Slot', async () => {
@@ -72,8 +73,8 @@ test('Aura 4-Stage Sequential Booking Flow Verification', async (t) => {
       from: TEST_PHONE,
       type: 'interactive',
       interactive: {
-        type: 'button_reply',
-        button_reply: { id: `date_${tomorrow}`, title: 'Tomorrow' }
+        type: 'list_reply',
+        list_reply: { id: `date_${tomorrow}`, title: 'Tomorrow' }
       }
     });
 
