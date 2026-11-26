@@ -7,7 +7,7 @@
 const salonConfig = require('../data/salon-config.json');
 const calendarService = require('./calendar');
 const db = require('./db');
-const { syncToSalonBackend } = require('./sync-service');
+const { syncAndTrack } = require('./sync-service');
 
 // In-memory fallback stores
 const memoryCustomers = new Map();
@@ -399,7 +399,7 @@ module.exports = {
 
     // Sync to Railway Salon CRM Backend (PostgreSQL)
     try {
-      const backendBooking = await syncToSalonBackend(record);
+      const backendBooking = await syncAndTrack(record);
       if (backendBooking) {
         record.crmBookingId = backendBooking.id;
       }

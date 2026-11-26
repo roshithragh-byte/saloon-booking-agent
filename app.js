@@ -23,6 +23,7 @@ const app = express();
 
 // Initialize database schema on startup
 db.initDatabase();
+require('./services/sync-service').startOutboxWorker();
 
 // Parse application/x-www-form-urlencoded
 app.use(

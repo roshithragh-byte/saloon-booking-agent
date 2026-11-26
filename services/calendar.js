@@ -124,7 +124,9 @@ class GoogleCalendarService {
     });
 
     const busy = response.data.calendars.primary?.busy || [];
-    return busy;
+    let crmBusy = [];
+    try { crmBusy = await require('./sync-service').getMergedCrmBusy(dateStr); } catch (e) { crmBusy = []; }
+    return crmBusy.length ? busy.concat(crmBusy) : busy;
   }
 
   /**
