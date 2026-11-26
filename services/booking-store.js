@@ -7,6 +7,7 @@
 const salonConfig = require('../data/salon-config.json');
 const calendarService = require('./calendar');
 const db = require('./db');
+const { syncToSalonBackend } = require('./sync-service');
 
 // In-memory fallback stores
 const memoryCustomers = new Map();
@@ -269,6 +270,16 @@ module.exports = {
       }
     } catch (err) {
       console.error("Failed to sync booking to Google Calendar:", err.message);
+    }
+
+    // Sync to Railway Salon CRM Backend (PostgreSQL)
+    try {
+      const backendBooking = await syncToSalonBackend(record);
+      if (backendBooking) {
+        record.crmBookingId = backendBooking.id;
+      }
+    } catch (err) {
+      console.error("Failed to forward booking to Railway CRM:", err.message);
     }
 
     return record;
