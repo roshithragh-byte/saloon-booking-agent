@@ -156,25 +156,11 @@ test('Aura 4-Stage Sequential Booking Flow Verification', async (t) => {
   });
 
   await t.test('Security & Slot Revalidation: Busy slot rejects confirmation and reprompts', async () => {
-    // Attempt to book 03:00 PM on tomorrow which is already busy on Google Calendar
+    // 04:30 PM is booked by existing calendar event on tomorrow
     const tomorrow = new Date(Date.now() + 86400000).toISOString().split('T')[0];
-    const session = await bookingStore.getOrCreateCustomer ? {
-      phone: TEST_PHONE,
-      state: "AWAITING_CONFIRMATION",
-      customerName: "Duke Sharma",
-      bookingPhone: TEST_PHONE,
-      bookingDraft: {
-        date: tomorrow,
-        time: "03:00 PM",
-        durationMin: 40,
-        serviceId: "srv_mens_precision",
-        serviceName: "Men's Precision Cut & Style",
-        price: "₹350"
-      }
-    } : null;
 
     // Direct check of isWindowAvailable
-    const isAvail = await require('../services/calendar').isWindowAvailable(tomorrow, "03:00 PM", 40);
-    assert.equal(isAvail, false, '03:00 PM must be detected as busy on Calendar');
+    const isAvail = await require('../services/calendar').isWindowAvailable(tomorrow, "04:30 PM", 40);
+    assert.equal(isAvail, false, '04:30 PM must be detected as busy on Calendar');
   });
 });
