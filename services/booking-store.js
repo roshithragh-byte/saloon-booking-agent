@@ -31,12 +31,62 @@ module.exports = {
     return salonConfig.categories;
   },
 
-  getCombosList() {
-    return salonConfig.combos;
+  getCombosList(targetGender = null) {
+    if (!targetGender) return salonConfig.combos;
+    return salonConfig.combos.filter(c => c.targetGender === targetGender || c.targetGender === "unisex");
   },
 
-  getAllServices() {
-    return salonConfig.services;
+  getAllServices(targetGender = null) {
+    if (!targetGender) return salonConfig.services;
+    return salonConfig.services.filter(s => s.targetGender === targetGender || s.targetGender === "unisex");
+  },
+
+  getCatalogSectionsForGender(gender = "men") {
+    const isMen = gender.toLowerCase() === "men";
+    const relevantCombos = this.getCombosList(isMen ? "men" : "women");
+    const relevantServices = this.getAllServices(isMen ? "men" : "women");
+
+    const sections = [];
+
+    // Section 1: Signature Combos
+    if (relevantCombos.length > 0) {
+      sections.push({
+        title: isMen ? "Men's Value Combos" : "Ladies Signature Combos",
+        rows: relevantCombos.slice(0, 5).map(c => ({
+          id: c.id,
+          title: c.name.substring(0, 24),
+          description: `${c.priceFormatted} · ${c.durationMin}m · ${c.savings}`
+        }))
+      });
+    }
+
+    // Section 2: Hair & Grooming
+    const hair = relevantServices.filter(s => s.category.includes("Hair"));
+    if (hair.length > 0) {
+      sections.push({
+        title: isMen ? "Men's Cuts & Beard" : "Ladies Hair & Styling",
+        rows: hair.slice(0, 8).map(s => ({
+          id: s.id,
+          title: s.name.substring(0, 24),
+          description: `${s.priceFormatted} · ${s.durationMin} mins`
+        }))
+      });
+    }
+
+    // Section 3: Skin, Hydra & Spas
+    const skinAndSpa = relevantServices.filter(s => s.category.includes("Skin") || s.category.includes("Spa") || s.category.includes("Hands") || s.category.includes("Color"));
+    if (skinAndSpa.length > 0) {
+      sections.push({
+        title: "Facials, Spas & Skin",
+        rows: skinAndSpa.slice(0, 8).map(s => ({
+          id: s.id,
+          title: s.name.substring(0, 24),
+          description: `${s.priceFormatted} · ${s.durationMin} mins`
+        }))
+      });
+    }
+
+    return sections;
   },
 
   getStaffList() {

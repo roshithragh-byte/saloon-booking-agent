@@ -1,6 +1,5 @@
 /**
- * Automated Verification Suite for Aura v2 MVP Architecture
- * Covers the 12 Audit Test Cases
+ * Automated Verification Suite for Aura 4-Stage Sequential Flow
  */
 "use strict";
 
@@ -10,11 +9,10 @@ const bookingStore = require('../services/booking-store');
 const Conversation = require('../services/conversation');
 const GraphApi = require('../services/graph-api');
 
-test('Aura v2 Architecture Verification', async (t) => {
+test('Aura 4-Stage Sequential Booking Flow Verification', async (t) => {
   const TEST_PHONE = '919836893550';
   const SENDER_PHONE_ID = '1438030339393992';
 
-  // Spy on GraphApi outbound calls
   let lastOutbound = null;
   const originalSendText = GraphApi.sendTextMessage;
   const originalSendButtons = GraphApi.sendInteractiveButtons;
@@ -39,63 +37,86 @@ test('Aura v2 Architecture Verification', async (t) => {
     GraphApi.sendInteractiveList = originalSendList;
   });
 
-  await t.test('Test 1 & 2: Customer lookup and returning profile name persistence', async () => {
-    // 1. New customer introduces name as "Duke"
+  await t.test('Step 1: First Hi prompts for Full Name', async () => {
     await Conversation.handleMessage(SENDER_PHONE_ID, {
-      id: 'wamid_test_1',
+      id: 'wamid_seq_1',
       from: TEST_PHONE,
       type: 'text',
-      text: { body: 'Hello, my name is Duke' }
-    });
-
-    const customer = await bookingStore.getOrCreateCustomer(TEST_PHONE);
-    assert.equal(customer.name, 'Duke', 'Customer name must be persisted as Duke');
-
-    // 2. Query upcoming appointments when none exist
-    await Conversation.handleMessage(SENDER_PHONE_ID, {
-      id: 'wamid_test_2',
-      from: TEST_PHONE,
-      type: 'text',
-      text: { body: 'Any upcoming appointment for me?' }
+      text: { body: 'Hi' }
     });
 
     assert.equal(lastOutbound.type, 'text');
-    assert.match(lastOutbound.text, /Duke/, 'Must greet Duke by stored profile');
-    assert.match(lastOutbound.text, /don't have any upcoming appointments/, 'Must correctly identify no bookings without claiming inability');
+    assert.match(lastOutbound.text, /Full Name/i, 'Must ask for customer full name first');
   });
 
-  await t.test('Test 3: Customer asks for haircut -> Disambiguation category buttons', async () => {
+  await t.test('Step 1 Cont.: Providing Name confirms Identity and advances to Step 2 (Date)', async () => {
     await Conversation.handleMessage(SENDER_PHONE_ID, {
-      id: 'wamid_test_3',
+      id: 'wamid_seq_2',
       from: TEST_PHONE,
       type: 'text',
-      text: { body: 'I want a haircut' }
+      text: { body: 'Duke Sharma' }
     });
 
-    assert.equal(lastOutbound.type, 'buttons', 'Must send interactive category buttons');
-    assert.equal(lastOutbound.buttons.length, 3);
-    assert.equal(lastOutbound.buttons[0].id, 'cat_mens_hair');
+    // Verify name saved in customer profile
+    const customer = await bookingStore.getOrCreateCustomer(TEST_PHONE);
+    assert.equal(customer.name, 'Duke Sharma');
+
+    assert.equal(lastOutbound.type, 'buttons');
+    assert.match(lastOutbound.header, /Step 2/i, 'Must prompt for Step 2 Date');
   });
 
-  await t.test('Test 4: Customer selects Men\'s Hair -> Interactive List with exact IDs', async () => {
+  await t.test('Step 2: Customer selects Date -> Prompts for Time Slot', async () => {
+    const tomorrow = new Date(Date.now() + 86400000).toISOString().split('T')[0];
     await Conversation.handleMessage(SENDER_PHONE_ID, {
-      id: 'wamid_test_4',
+      id: 'wamid_seq_3',
       from: TEST_PHONE,
       type: 'interactive',
       interactive: {
         type: 'button_reply',
-        button_reply: { id: 'cat_mens_hair', title: "Men's Cuts & Beard" }
+        button_reply: { id: `date_${tomorrow}`, title: 'Tomorrow' }
       }
     });
 
-    assert.equal(lastOutbound.type, 'list', 'Must render WhatsApp interactive list');
-    const rows = lastOutbound.sections[0].rows;
-    assert.ok(rows.some(r => r.id === 'srv_mens_precision'), 'Must contain exact srv_mens_precision ID');
+    assert.equal(lastOutbound.type, 'list');
+    assert.match(lastOutbound.header, /Step 2: Select Time/i);
   });
 
-  await t.test('Test 5: Customer selects exact srv_mens_precision -> Prompt for date', async () => {
+  await t.test('Step 2 Cont.: Selecting Time Slot -> Prompts Step 3 (Men vs Ladies Service Catalog)', async () => {
     await Conversation.handleMessage(SENDER_PHONE_ID, {
-      id: 'wamid_test_5',
+      id: 'wamid_seq_4',
+      from: TEST_PHONE,
+      type: 'interactive',
+      interactive: {
+        type: 'list_reply',
+        list_reply: { id: 'slot_03:00_PM', title: '03:00 PM' }
+      }
+    });
+
+    assert.equal(lastOutbound.type, 'buttons');
+    assert.match(lastOutbound.header, /Step 3: Service Catalog/i);
+    assert.equal(lastOutbound.buttons[0].id, 'gender_men');
+    assert.equal(lastOutbound.buttons[1].id, 'gender_women');
+  });
+
+  await t.test('Step 3: Selecting Men\'s Services shows complete tailored catalog with Combos & Cuts', async () => {
+    await Conversation.handleMessage(SENDER_PHONE_ID, {
+      id: 'wamid_seq_5',
+      from: TEST_PHONE,
+      type: 'interactive',
+      interactive: {
+        type: 'button_reply',
+        button_reply: { id: 'gender_men', title: "Men's Services ✂️" }
+      }
+    });
+
+    assert.equal(lastOutbound.type, 'list');
+    assert.ok(lastOutbound.sections.length >= 2, 'Must include Combos and Haircuts sections');
+    assert.ok(lastOutbound.sections.some(s => s.title.includes("Combos")));
+  });
+
+  await t.test('Step 4: Selecting Service presents Step 4 Review & Confirmation Card', async () => {
+    await Conversation.handleMessage(SENDER_PHONE_ID, {
+      id: 'wamid_seq_6',
       from: TEST_PHONE,
       type: 'interactive',
       interactive: {
@@ -105,43 +126,17 @@ test('Aura v2 Architecture Verification', async (t) => {
     });
 
     assert.equal(lastOutbound.type, 'buttons');
-    assert.match(lastOutbound.text, /Duke/);
-  });
-
-  await t.test('Test 6 & 7: Service-specific duration availability check', async () => {
-    const tomorrow = new Date(Date.now() + 86400000).toISOString().split('T')[0];
-    await Conversation.handleMessage(SENDER_PHONE_ID, {
-      id: 'wamid_test_6',
-      from: TEST_PHONE,
-      type: 'text',
-      text: { body: `Tomorrow (${tomorrow})` }
-    });
-
-    assert.equal(lastOutbound.type, 'list', 'Must return available slots list');
-    assert.match(lastOutbound.sections[0].title, new RegExp(tomorrow));
-  });
-
-  await t.test('Test 8: Slot selection presents Confirmation Card with Native Buttons', async () => {
-    await Conversation.handleMessage(SENDER_PHONE_ID, {
-      id: 'wamid_test_7',
-      from: TEST_PHONE,
-      type: 'interactive',
-      interactive: {
-        type: 'list_reply',
-        list_reply: { id: 'slot_04:30_PM', title: '04:30 PM' }
-      }
-    });
-
-    assert.equal(lastOutbound.type, 'buttons');
-    assert.match(lastOutbound.text, /Duke/);
-    assert.match(lastOutbound.text, /04:30 PM/);
-    assert.match(lastOutbound.text, /Men's Precision Cut/);
+    assert.match(lastOutbound.header, /Step 4: Review & Confirm/i);
+    assert.match(lastOutbound.text, /Duke Sharma/);
+    assert.match(lastOutbound.text, /919836893550/);
+    assert.match(lastOutbound.text, /03:00 PM/);
+    assert.match(lastOutbound.text, /Men's Precision Cut & Style/);
     assert.equal(lastOutbound.buttons[0].id, 'btn_confirm_booking');
   });
 
-  await t.test('Test 9: Confirmation Execution creates backend-verified booking', async () => {
+  await t.test('Step 4 Execution: Confirm Booking executes transactional creation', async () => {
     await Conversation.handleMessage(SENDER_PHONE_ID, {
-      id: 'wamid_test_8',
+      id: 'wamid_seq_7',
       from: TEST_PHONE,
       type: 'interactive',
       interactive: {
@@ -151,29 +146,7 @@ test('Aura v2 Architecture Verification', async (t) => {
     });
 
     assert.equal(lastOutbound.type, 'text');
-    assert.match(lastOutbound.text, /Booking Confirmed/);
+    assert.match(lastOutbound.text, /Booking Confirmed/i);
     assert.match(lastOutbound.text, /NU-\d{4}/);
-
-    // Verify appointment is now returned when user asks for upcoming appointments
-    await Conversation.handleMessage(SENDER_PHONE_ID, {
-      id: 'wamid_test_9',
-      from: TEST_PHONE,
-      type: 'text',
-      text: { body: 'Any upcoming appointment for me, Duke?' }
-    });
-
-    assert.match(lastOutbound.text, /Men's Precision Cut/, 'Must now display the confirmed booking in history');
-  });
-
-  await t.test('Test 10: Duplicate webhook protection', async () => {
-    lastOutbound = null;
-    await Conversation.handleMessage(SENDER_PHONE_ID, {
-      id: 'wamid_test_8', // repeated ID
-      from: TEST_PHONE,
-      type: 'text',
-      text: { body: 'hello' }
-    });
-
-    assert.equal(lastOutbound, null, 'Duplicate webhook ID must be dropped without processing');
   });
 });

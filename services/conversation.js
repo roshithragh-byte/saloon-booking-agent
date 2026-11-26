@@ -1,6 +1,10 @@
 /**
  * Aura State Machine & Orchestrator v2
- * Handles deterministic state transitions, native WhatsApp UI menus, and customer profile lookup
+ * Sequential 4-Step Flow:
+ * 1. Customer Identity & Contact Confirmation (Name & Phone)
+ * 2. Scheduling (Preferred Date & Time)
+ * 3. Service Discovery (Gender Preference -> Filtered Complete Catalog List)
+ * 4. Review & Final Confirmation Card
  */
 "use strict";
 
@@ -12,16 +16,22 @@ const bookingStore = require('./booking-store');
 // Deduplication cache
 const processedMessageIds = new Set();
 
-// Persistent in-memory session states: phone -> Session Object
+// Persistent session states: phone -> Session Object
 const userSessions = new Map();
 
 async function getOrCreateSession(phone, senderProfileName) {
   if (!userSessions.has(phone)) {
     const customer = await bookingStore.getOrCreateCustomer(phone, senderProfileName);
+    const initialName = (customer && customer.name !== "Valued Guest") 
+      ? customer.name 
+      : (senderProfileName || null);
+
     userSessions.set(phone, {
       phone,
-      state: "IDENTIFIED",
-      customerName: customer ? customer.name : (senderProfileName || "Valued Guest"),
+      state: initialName ? "AWAITING_DATE" : "AWAITING_NAME",
+      customerName: initialName,
+      bookingPhone: phone,
+      gender: null,
       history: [],
       bookingDraft: {
         serviceId: null,
@@ -34,12 +44,7 @@ async function getOrCreateSession(phone, senderProfileName) {
       }
     });
   }
-  const session = userSessions.get(phone);
-  if (senderProfileName && session.customerName === "Valued Guest") {
-    session.customerName = senderProfileName;
-    await bookingStore.updateCustomerName(phone, senderProfileName);
-  }
-  return session;
+  return userSessions.get(phone);
 }
 
 function updateHistory(session, userText, modelReply) {
@@ -50,7 +55,7 @@ function updateHistory(session, userText, modelReply) {
   }
 }
 
-// Helpers to extract explicit date
+// Helpers
 function extractDateFromText(text) {
   const lower = text.toLowerCase();
   const today = new Date();
@@ -62,17 +67,21 @@ function extractDateFromText(text) {
     const tomorrow = new Date(today.getTime() + 86400000);
     return tomorrow.toISOString().split("T")[0];
   }
-  // Match YYYY-MM-DD
   const matchIso = text.match(/\b(202\d-\d{2}-\d{2})\b/);
   if (matchIso) return matchIso[1];
 
   return null;
 }
 
-// Helpers to extract name if user explicitly says "My name is Duke"
-function extractNameFromText(text) {
-  const match = text.match(/(?:my name is|name is|i am|call me|name:?)\s+([a-zA-Z\s]{2,25})/i);
-  if (match) return match[1].trim();
+function extractTimeFromText(text) {
+  const match = text.match(/\b((?:0?[1-9]|1[0-2])(?::[0-5][0-9])?\s*(?:am|pm))\b/i);
+  if (match) {
+    let t = match[1].toUpperCase();
+    if (!t.includes(":")) {
+      t = t.replace(/(AM|PM)/, ":00 $1");
+    }
+    return t;
+  }
   return null;
 }
 
@@ -84,15 +93,13 @@ module.exports = class Conversation {
   static async handleMessage(senderPhoneNumberId, rawMessage) {
     const message = new Message(rawMessage);
 
-    // Ignore events without content
     if (!message.textBody && message.type !== 'interactive_button' && message.type !== 'interactive_list') {
       return;
     }
 
-    // Prevent duplicate webhook execution
+    // Deduplication
     if (message.id) {
       if (processedMessageIds.has(message.id)) {
-        console.log(`Duplicate webhook ${message.id} ignored.`);
         return;
       }
       processedMessageIds.add(message.id);
@@ -107,53 +114,54 @@ module.exports = class Conversation {
 
     console.log(`[Session: ${customerPhone}] State: ${session.state} | Input: "${userPrompt}" | ID: ${interactiveId}`);
 
-    // Check if user explicitly corrected or mentioned their name
-    const detectedName = extractNameFromText(userPrompt);
-    if (detectedName) {
-      session.customerName = detectedName;
-      await bookingStore.updateCustomerName(customerPhone, detectedName);
-    }
-
     try {
-      // -------------------------------------------------------------
-      // 1. DIRECT ACTION: User tapped an interactive button
-      // -------------------------------------------------------------
+      // -------------------------------------------------------------------
+      // 1. DIRECT ACTION DISPATCHER (Buttons & Lists)
+      // -------------------------------------------------------------------
       if (interactiveId) {
-        // Confirmation button pressed
+        // Confirmation Card buttons
         if (interactiveId === "btn_confirm_booking") {
           return await this.#executeBookingConfirmation(senderPhoneNumberId, customerPhone, session, message.id);
         }
-
-        // Edit button pressed
         if (interactiveId === "btn_edit_booking") {
-          session.state = "AWAITING_SERVICE_SELECT";
-          session.bookingDraft = { serviceId: null, serviceName: null, date: null, time: null };
-          return await this.#sendCategoryDisambiguation(senderPhoneNumberId, customerPhone, message.id);
+          session.state = "AWAITING_SERVICE";
+          return await this.#promptGenderSelection(senderPhoneNumberId, customerPhone, message.id);
         }
 
-        // Category chosen (cat_...)
-        if (interactiveId.startsWith("cat_")) {
-          return await this.#sendServicesList(senderPhoneNumberId, customerPhone, interactiveId, message.id);
+        // Gender Filter buttons ("gender_men" or "gender_women")
+        if (interactiveId.startsWith("gender_")) {
+          session.gender = interactiveId === "gender_men" ? "men" : "women";
+          session.state = "AWAITING_SERVICE_SELECT";
+          return await this.#sendGenderCatalogList(senderPhoneNumberId, customerPhone, session, message.id);
         }
 
         // Exact Service chosen (srv_... or cmb_...)
         if (interactiveId.startsWith("srv_") || interactiveId.startsWith("cmb_")) {
-          return await this.#handleServiceSelected(senderPhoneNumberId, customerPhone, session, interactiveId, message.id);
+          return await this.#handleServiceChosen(senderPhoneNumberId, customerPhone, session, interactiveId, message.id);
+        }
+
+        // Exact Date Quick Button
+        if (interactiveId.startsWith("date_")) {
+          session.bookingDraft.date = interactiveId.replace("date_", "");
+          session.state = "AWAITING_TIME_SLOT";
+          return await this.#sendTimeSlotMenu(senderPhoneNumberId, customerPhone, session, message.id);
         }
 
         // Exact Time Slot chosen (slot_...)
         if (interactiveId.startsWith("slot_")) {
-          const chosenSlot = interactiveId.replace("slot_", "").replace(/_/g, " ");
-          return await this.#handleSlotSelected(senderPhoneNumberId, customerPhone, session, chosenSlot, message.id);
+          session.bookingDraft.time = interactiveId.replace("slot_", "").replace(/_/g, " ");
+          session.state = "AWAITING_SERVICE";
+          return await this.#promptGenderSelection(senderPhoneNumberId, customerPhone, message.id);
         }
       }
 
-      // -------------------------------------------------------------
-      // 2. INTENT: Check existing appointments ("any appointment for me?")
-      // -------------------------------------------------------------
+      // -------------------------------------------------------------------
+      // 2. CHECK EXISTING APPOINTMENTS INTENT
+      // -------------------------------------------------------------------
       const lower = userPrompt.toLowerCase();
       if (
-        lower.includes("appointment") && (lower.includes("any") || lower.includes("my") || lower.includes("upcoming") || lower.includes("check") || lower.includes("status"))
+        lower.includes("appointment") && 
+        (lower.includes("any") || lower.includes("my") || lower.includes("upcoming") || lower.includes("check") || lower.includes("status"))
       ) {
         const upcoming = await bookingStore.getCustomerUpcomingAppointments(customerPhone);
         if (upcoming.length > 0) {
@@ -165,7 +173,7 @@ module.exports = class Conversation {
             message.id,
             senderPhoneNumberId,
             customerPhone,
-            `Hello ${session.customerName}! ✨ Here is your upcoming appointment at Natural’s Unisex Salon:\n\n${cards}\n\nNeed to reschedule or book another service? Just let me know!`
+            `Hello ${session.customerName || "there"}! ✨ Here is your upcoming appointment at Natural’s Unisex Salon:\n\n${cards}\n\nNeed to reschedule or book another service? Just let me know!`
           );
           return;
         } else {
@@ -173,74 +181,105 @@ module.exports = class Conversation {
             message.id,
             senderPhoneNumberId,
             customerPhone,
-            `Hello ${session.customerName}! ✨ You don't have any upcoming appointments scheduled right now.\n\nWould you like to book a fresh haircut, skin treatment, or signature combo?`
+            `Hello ${session.customerName || "there"}! ✨ You don't have any upcoming appointments scheduled right now.\n\nWould you like to book an appointment?`
+          );
+          session.state = session.customerName ? "AWAITING_DATE" : "AWAITING_NAME";
+          return;
+        }
+      }
+
+      // -------------------------------------------------------------------
+      // 3. STEP 1: IDENTITY & CONTACT CONFIRMATION
+      // -------------------------------------------------------------------
+      if (session.state === "AWAITING_NAME" || !session.customerName) {
+        // If message is just a greeting like "hi", ask for their name
+        if (["hi", "hello", "hey", "hola", "namaste", "good morning", "good evening"].includes(lower)) {
+          await GraphApi.sendTextMessage(
+            message.id,
+            senderPhoneNumberId,
+            customerPhone,
+            "Welcome to *Natural’s Unisex Salon, Kottakkal*! ✨\n\nTo get started with your reservation, may I have your **Full Name**?"
+          );
+          return;
+        }
+
+        // Clean user input as their name
+        const cleanName = userPrompt.replace(/[^\w\s]/gi, '').trim();
+        if (cleanName.length >= 2) {
+          session.customerName = cleanName;
+          await bookingStore.updateCustomerName(customerPhone, cleanName);
+          session.state = "AWAITING_DATE";
+
+          await GraphApi.sendTextMessage(
+            message.id,
+            senderPhoneNumberId,
+            customerPhone,
+            `Nice to meet you, *${cleanName}*! ✨\nWe'll confirm your reservation for **+${customerPhone}**.`
+          );
+          return await this.#promptDateSelection(senderPhoneNumberId, customerPhone, session, message.id);
+        } else {
+          await GraphApi.sendTextMessage(
+            message.id,
+            senderPhoneNumberId,
+            customerPhone,
+            "Please provide your **Full Name** for the booking reservation:"
           );
           return;
         }
       }
 
-      // -------------------------------------------------------------
-      // 3. INTENT: Direct Service Disambiguation ("I want a haircut", "book haircut")
-      // -------------------------------------------------------------
-      if (lower.includes("haircut") || lower.includes("hair cut") || lower.includes("styling")) {
-        session.state = "DISAMBIGUATING_CATEGORY";
-        return await this.#sendCategoryDisambiguation(senderPhoneNumberId, customerPhone, message.id);
-      }
+      // -------------------------------------------------------------------
+      // 4. STEP 2: DATE & TIME SCHEDULING
+      // -------------------------------------------------------------------
+      if (session.state === "AWAITING_DATE") {
+        const parsedDate = extractDateFromText(userPrompt);
+        const parsedTime = extractTimeFromText(userPrompt);
 
-      // Check if user picked an exact service by typing name
-      const matchedItem = bookingStore.findItemByName(userPrompt);
-      if (matchedItem) {
-        return await this.#handleServiceSelected(senderPhoneNumberId, customerPhone, session, matchedItem.id, message.id);
-      }
-
-      // -------------------------------------------------------------
-      // 4. STATE: AWAITING_NAME (Capturing customer's real name before choosing day/time)
-      // -------------------------------------------------------------
-      if (session.state === "AWAITING_NAME") {
-        const cleanedName = userPrompt.replace(/[^\w\s]/gi, '').trim();
-        if (cleanedName.length >= 2) {
-          session.customerName = cleanedName;
-          await bookingStore.updateCustomerName(customerPhone, cleanedName);
-
-          // If a slot was already chosen, go directly to confirmation
-          if (session.bookingDraft.time && session.bookingDraft.date) {
-            return await this.#presentConfirmationCard(senderPhoneNumberId, customerPhone, session, message.id);
-          }
-
-          // If date was already chosen, show time slots
-          if (session.bookingDraft.date) {
+        if (parsedDate) {
+          session.bookingDraft.date = parsedDate;
+          if (parsedTime) {
+            session.bookingDraft.time = parsedTime;
+            session.state = "AWAITING_SERVICE";
+            return await this.#promptGenderSelection(senderPhoneNumberId, customerPhone, message.id);
+          } else {
             session.state = "AWAITING_TIME_SLOT";
             return await this.#sendTimeSlotMenu(senderPhoneNumberId, customerPhone, session, message.id);
           }
-
-          // Otherwise proceed to day selection menu
-          return await this.#sendDaySelectionMenu(senderPhoneNumberId, customerPhone, session, message.id);
-        } else {
-          await GraphApi.sendTextMessage(
-            message.id,
-            senderPhoneNumberId,
-            customerPhone,
-            "Please provide a valid name for the reservation so our receptionist can greet you:"
-          );
-          return;
         }
       }
 
-      // -------------------------------------------------------------
-      // 5. STATE: AWAITING_DATE (User selected a service, now providing date)
-      // -------------------------------------------------------------
-      if (session.state === "AWAITING_DATE" || (session.bookingDraft.serviceId && !session.bookingDraft.date)) {
-        const parsedDate = extractDateFromText(userPrompt);
-        if (parsedDate) {
-          session.bookingDraft.date = parsedDate;
-          session.state = "AWAITING_TIME_SLOT";
-          return await this.#sendTimeSlotMenu(senderPhoneNumberId, customerPhone, session, message.id);
+      if (session.state === "AWAITING_TIME_SLOT") {
+        const parsedTime = extractTimeFromText(userPrompt);
+        if (parsedTime) {
+          session.bookingDraft.time = parsedTime;
+          session.state = "AWAITING_SERVICE";
+          return await this.#promptGenderSelection(senderPhoneNumberId, customerPhone, message.id);
         }
       }
 
-      // -------------------------------------------------------------
-      // 5. NATURAL LANGUAGE AGENT TURN
-      // -------------------------------------------------------------
+      // -------------------------------------------------------------------
+      // 5. STEP 3: SERVICE DISCOVERY BY TYPED NAME
+      // -------------------------------------------------------------------
+      const matchedItem = bookingStore.findItemByName(userPrompt);
+      if (matchedItem) {
+        return await this.#handleServiceChosen(senderPhoneNumberId, customerPhone, session, matchedItem.id, message.id);
+      }
+
+      // If user typed "men" or "women" when in service step
+      if (session.state === "AWAITING_SERVICE") {
+        if (lower.includes("men") || lower.includes("male") || lower.includes("boy")) {
+          session.gender = "men";
+          return await this.#sendGenderCatalogList(senderPhoneNumberId, customerPhone, session, message.id);
+        }
+        if (lower.includes("women") || lower.includes("female") || lower.includes("lady") || lower.includes("ladies")) {
+          session.gender = "women";
+          return await this.#sendGenderCatalogList(senderPhoneNumberId, customerPhone, session, message.id);
+        }
+      }
+
+      // -------------------------------------------------------------------
+      // 6. NATURAL CONVERSATIONAL FALLBACK (AI Turn)
+      // -------------------------------------------------------------------
       const customer = await bookingStore.getOrCreateCustomer(customerPhone, session.customerName);
       const upcoming = await bookingStore.getCustomerUpcomingAppointments(customerPhone);
       
@@ -266,86 +305,14 @@ module.exports = class Conversation {
         message.id,
         senderPhoneNumberId,
         customerPhone,
-        "I'm sorry, I encountered a temporary connection issue with our salon system. Please try again in a moment."
+        "I'm sorry, I encountered a temporary issue. Please send 'hi' to refresh our session."
       );
     }
   }
 
-  // --- UI Action Handlers ---
+  // --- STAGE HELPER METHODS ---
 
-  static async #sendCategoryDisambiguation(senderPhoneNumberId, customerPhone, messageId) {
-    const buttons = [
-      { id: "cat_mens_hair", title: "Men's Cuts & Beard" },
-      { id: "cat_ladies_hair", title: "Ladies Haircuts" },
-      { id: "cat_combos", title: "Signature Combos" }
-    ];
-
-    await GraphApi.sendInteractiveButtons(
-      messageId,
-      senderPhoneNumberId,
-      customerPhone,
-      "Certainly! ✂️ What type of styling are you looking for today?",
-      buttons,
-      "Natural's Unisex Salon"
-    );
-  }
-
-  static async #sendServicesList(senderPhoneNumberId, customerPhone, categoryId, messageId) {
-    const services = bookingStore.getServicesByCategory(categoryId);
-    const category = bookingStore.getCategories().find(c => c.id === categoryId);
-
-    const rows = services.slice(0, 10).map(s => ({
-      id: s.id,
-      title: s.name.substring(0, 24),
-      description: `${s.priceFormatted} · ${s.durationMin} mins`
-    }));
-
-    const sections = [{ title: (category ? category.title : "Services").substring(0, 24), rows }];
-
-    await GraphApi.sendInteractiveList(
-      messageId,
-      senderPhoneNumberId,
-      customerPhone,
-      "Please tap below to select your exact service:",
-      "View Services",
-      sections,
-      "Natural's Unisex Salon"
-    );
-  }
-
-  static async #handleServiceSelected(senderPhoneNumberId, customerPhone, session, itemId, messageId) {
-    const item = bookingStore.findItemById(itemId);
-    if (!item) return;
-
-    session.bookingDraft.serviceId = item.id;
-    session.bookingDraft.serviceName = item.name;
-    session.bookingDraft.durationMin = item.durationMin;
-    session.bookingDraft.price = item.priceFormatted;
-    session.bookingDraft.staffName = item.eligibleStaff ? item.eligibleStaff[0] : "Senior Stylist";
-
-    // 1. Mandatory Name Check: If customer name is unknown or default, ask for it immediately
-    const isNameUnknown = !session.customerName || session.customerName.toLowerCase() === "valued guest";
-    if (isNameUnknown) {
-      session.state = "AWAITING_NAME";
-      await GraphApi.sendTextMessage(
-        messageId,
-        senderPhoneNumberId,
-        customerPhone,
-        `You selected *${item.name}* (${item.priceFormatted} · ${item.durationMin} mins) ✨\n\nBefore picking your preferred time, may I have your **Full Name** for the appointment reservation?`
-      );
-      return;
-    }
-
-    // 2. If name is already known and date is already chosen, jump directly to time slot selection
-    if (session.bookingDraft.date) {
-      session.state = "AWAITING_TIME_SLOT";
-      return await this.#sendTimeSlotMenu(senderPhoneNumberId, customerPhone, session, messageId);
-    }
-
-    return await this.#sendDaySelectionMenu(senderPhoneNumberId, customerPhone, session, messageId);
-  }
-
-  static async #sendDaySelectionMenu(senderPhoneNumberId, customerPhone, session, messageId) {
+  static async #promptDateSelection(senderPhoneNumberId, customerPhone, session, messageId) {
     session.state = "AWAITING_DATE";
     const today = new Date().toISOString().split("T")[0];
     const tomorrow = new Date(Date.now() + 86400000).toISOString().split("T")[0];
@@ -359,22 +326,22 @@ module.exports = class Conversation {
       messageId,
       senderPhoneNumberId,
       customerPhone,
-      `Thanks, *${session.customerName}*! ✨\n\nWhich day would you like to visit us? (Or type any specific date like 2026-11-27)`,
+      "Which day would you like to visit us? 📅\n(You can also type any date, e.g. 2026-11-28)",
       buttons,
-      "Select Appointment Day"
+      "Step 2: Select Date"
     );
   }
 
   static async #sendTimeSlotMenu(senderPhoneNumberId, customerPhone, session, messageId) {
-    const { serviceId, durationMin, date } = session.bookingDraft;
-    const availableSlots = await bookingStore.getAvailableSlotsForService(serviceId, date);
+    const date = session.bookingDraft.date;
+    const availableSlots = await bookingStore.getAvailableSlotsForService(null, date);
 
     if (!availableSlots || availableSlots.length === 0) {
       await GraphApi.sendTextMessage(
         messageId,
         senderPhoneNumberId,
         customerPhone,
-        `All slots are currently booked for ${date}. Would you like to check tomorrow or another day?`
+        `All slots are booked for ${date}. Would you like to check tomorrow or another day?`
       );
       return;
     }
@@ -382,7 +349,7 @@ module.exports = class Conversation {
     const rows = availableSlots.slice(0, 10).map(slot => ({
       id: `slot_${slot.replace(/ /g, "_")}`,
       title: slot,
-      description: `${durationMin || 45} mins session`
+      description: "Available opening"
     }));
 
     const sections = [{ title: `Slots: ${date}`.substring(0, 24), rows }];
@@ -391,28 +358,55 @@ module.exports = class Conversation {
       messageId,
       senderPhoneNumberId,
       customerPhone,
-      `Here are the available openings on *${date}* for your *${session.bookingDraft.serviceName}*:`,
+      `Please choose your preferred time on *${date}*:`,
       "Choose Time Slot",
       sections,
-      "Available Time Slots"
+      "Step 2: Select Time"
     );
   }
 
-  static async #handleSlotSelected(senderPhoneNumberId, customerPhone, session, slotTime, messageId) {
-    session.bookingDraft.time = slotTime;
+  static async #promptGenderSelection(senderPhoneNumberId, customerPhone, messageId) {
+    const buttons = [
+      { id: "gender_men", title: "Men's Services ✂️" },
+      { id: "gender_women", title: "Ladies' Services 💇‍♀️" }
+    ];
 
-    // Check if customer name is still generic ("Valued Guest")
-    if (!session.customerName || session.customerName.toLowerCase() === "valued guest") {
-      session.state = "AWAITING_NAME";
-      await GraphApi.sendTextMessage(
-        messageId,
-        senderPhoneNumberId,
-        customerPhone,
-        `Great! Slot *${slotTime}* on *${session.bookingDraft.date}* is locked in. ✂️\n\nMay I have your **Full Name** to put on the appointment reservation?`
-      );
-      return;
-    }
+    await GraphApi.sendInteractiveButtons(
+      messageId,
+      senderPhoneNumberId,
+      customerPhone,
+      "What services do you need? Please let us know if you're looking for Men's or Ladies' services to view the tailored catalog:",
+      buttons,
+      "Step 3: Service Catalog"
+    );
+  }
 
+  static async #sendGenderCatalogList(senderPhoneNumberId, customerPhone, session, messageId) {
+    const sections = bookingStore.getCatalogSectionsForGender(session.gender || "men");
+    const label = session.gender === "women" ? "Ladies' Menu" : "Men's Menu";
+
+    await GraphApi.sendInteractiveList(
+      messageId,
+      senderPhoneNumberId,
+      customerPhone,
+      `Here is our complete *${label}* for Natural's Unisex Salon:\nTap below to select your desired service:`,
+      "View All Services",
+      sections,
+      label
+    );
+  }
+
+  static async #handleServiceChosen(senderPhoneNumberId, customerPhone, session, itemId, messageId) {
+    const item = bookingStore.findItemById(itemId);
+    if (!item) return;
+
+    session.bookingDraft.serviceId = item.id;
+    session.bookingDraft.serviceName = item.name;
+    session.bookingDraft.durationMin = item.durationMin;
+    session.bookingDraft.price = item.priceFormatted;
+    session.bookingDraft.staffName = item.eligibleStaff ? item.eligibleStaff[0] : "Senior Stylist";
+
+    // Now present Step 4: Final Confirmation Card
     return await this.#presentConfirmationCard(senderPhoneNumberId, customerPhone, session, messageId);
   }
 
@@ -422,7 +416,7 @@ module.exports = class Conversation {
     const draft = session.bookingDraft;
     const summaryCard = [
       `👤 *Guest Name:* ${session.customerName}`,
-      `📞 *Phone Number:* +${customerPhone}`,
+      `📞 *Phone Number:* +${session.bookingPhone || customerPhone}`,
       `✂️ *Service:* ${draft.serviceName}`,
       `📅 *Date:* ${draft.date}`,
       `🕒 *Time:* ${draft.time} (${draft.durationMin} mins)`,
@@ -441,7 +435,7 @@ module.exports = class Conversation {
       customerPhone,
       `Please review your appointment summary:\n\n${summaryCard}`,
       buttons,
-      "Review Your Appointment"
+      "Step 4: Review & Confirm"
     );
   }
 
@@ -454,15 +448,15 @@ module.exports = class Conversation {
         customerPhone,
         "It looks like some appointment details were incomplete. Let's restart your booking selection."
       );
-      session.state = "IDENTIFIED";
+      session.state = "AWAITING_DATE";
       return;
     }
 
     session.state = "BOOKING_IN_PROGRESS";
 
-    // Atomically create booking and sync with Google Calendar
+    // Atomically create booking and sync with Google Calendar & PostgreSQL
     const confirmedBooking = await bookingStore.createBooking({
-      customerPhone,
+      customerPhone: session.bookingPhone || customerPhone,
       customerName: session.customerName,
       serviceId: draft.serviceId,
       serviceName: draft.serviceName,
