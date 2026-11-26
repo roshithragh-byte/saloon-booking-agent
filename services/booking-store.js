@@ -14,6 +14,10 @@ const memoryCustomers = new Map();
 const memoryAppointments = [];
 
 module.exports = {
+  getDb() {
+    return db;
+  },
+
   getSalonDetails() {
     return {
       salonName: salonConfig.salonName,
@@ -245,11 +249,21 @@ module.exports = {
   async getAvailableSlotsForService(serviceIdOrName, date) {
     const item = this.findItemById(serviceIdOrName) || this.findItemByName(serviceIdOrName);
     const durationMin = item ? item.durationMin : 45;
-    return calendarService.getAvailableSlots(date, durationMin);
+    const res = await calendarService.getAvailableSlots(date, durationMin);
+    if (res && Array.isArray(res.slots)) {
+      return res.slots;
+    }
+    if (Array.isArray(res)) {
+      return res;
+    }
+    return [];
   },
 
   async createBooking(booking) {
-    const id = "NU-" + Math.floor(1000 + Math.random() * 9000);
+    // Generate collision-resistant sequential booking ID: NU-YYYYMMDD-XXXX
+    const dateCompact = (booking.date || new Date().toISOString().split('T')[0]).replace(/-/g, '');
+    const randomHex = Math.random().toString(36).substring(2, 6).toUpperCase();
+    const id = `NU-${dateCompact}-${randomHex}`;
 
     const item = this.findItemById(booking.serviceId) || this.findItemByName(booking.service);
     const serviceName = item ? item.name : (booking.serviceName || booking.service || "Salon Treatment");
@@ -281,10 +295,14 @@ module.exports = {
     // Store in memory
     memoryAppointments.push(record);
 
-    // Persist in PostgreSQL
+    // Persist in PostgreSQL using an atomic transaction
     if (db.getPool()) {
+      let client = null;
       try {
-        await db.query(
+        client = await db.getClient();
+        await client.query('BEGIN');
+
+        await client.query(
           `INSERT INTO appointments (id, customer_phone, customer_name, service_id, service_name, duration_min, price, staff_name, date, time, status, location)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
           [
@@ -303,12 +321,34 @@ module.exports = {
           ]
         );
 
-        await db.query(
+        await client.query(
           `UPDATE customers SET total_visits = total_visits + 1 WHERE phone = $1`,
           [record.customerPhone]
         );
+
+        // Queue integration synchronization jobs into integration_outbox
+        const outboxIdCal = `outbox_cal_${record.id}`;
+        await client.query(
+          `INSERT INTO integration_outbox (id, booking_id, target, payload, status)
+           VALUES ($1, $2, 'GOOGLE_CALENDAR', $3, 'PENDING')
+           ON CONFLICT (id) DO NOTHING`,
+          [outboxIdCal, record.id, JSON.stringify(record)]
+        );
+
+        const outboxIdCrm = `outbox_crm_${record.id}`;
+        await client.query(
+          `INSERT INTO integration_outbox (id, booking_id, target, payload, status)
+           VALUES ($1, $2, 'RAILWAY_CRM', $3, 'PENDING')
+           ON CONFLICT (id) DO NOTHING`,
+          [outboxIdCrm, record.id, JSON.stringify(record)]
+        );
+
+        await client.query('COMMIT');
       } catch (err) {
-        console.error("Failed to insert appointment into PostgreSQL:", err.message);
+        if (client) await client.query('ROLLBACK');
+        console.error("Failed to insert appointment transaction into PostgreSQL:", err.message);
+      } finally {
+        if (client) client.release();
       }
     }
 
@@ -329,7 +369,7 @@ module.exports = {
         record.crmBookingId = backendBooking.id;
       }
     } catch (err) {
-      console.error("Failed to forward booking to Railway CRM:", err.message);
+      console.error("Failed to sync booking to Railway CRM:", err.message);
     }
 
     return record;

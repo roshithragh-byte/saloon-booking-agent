@@ -1,5 +1,5 @@
 /**
- * PostgreSQL Database Connection & Schema Migration Service
+ * PostgreSQL Database Connection, Transaction Management & Schema Migrations
  */
 "use strict";
 
@@ -28,7 +28,7 @@ async function initDatabase() {
     const client = await p.connect();
     console.log("🐘 Connected to PostgreSQL successfully!");
 
-    // Create tables for Customers and Appointments
+    // Execute idempotent migrations
     await client.query(`
       CREATE TABLE IF NOT EXISTS customers (
         phone VARCHAR(50) PRIMARY KEY,
@@ -53,15 +53,44 @@ async function initDatabase() {
         status VARCHAR(50) DEFAULT 'confirmed',
         calendar_event_link TEXT,
         location VARCHAR(255),
-        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      );
+
+      -- Persistent conversation sessions across restarts & scaling
+      CREATE TABLE IF NOT EXISTS conversation_sessions (
+        phone VARCHAR(50) PRIMARY KEY,
+        state VARCHAR(50) NOT NULL,
+        data JSONB NOT NULL DEFAULT '{}'::jsonb,
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      );
+
+      -- Integration outbox for resilient retryable synchronization
+      CREATE TABLE IF NOT EXISTS integration_outbox (
+        id VARCHAR(50) PRIMARY KEY,
+        booking_id VARCHAR(50) REFERENCES appointments(id) ON DELETE CASCADE,
+        target VARCHAR(50) NOT NULL,
+        payload JSONB NOT NULL,
+        status VARCHAR(50) DEFAULT 'PENDING',
+        attempts INTEGER DEFAULT 0,
+        last_error TEXT,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      );
+
+      -- Webhook deduplication log
+      CREATE TABLE IF NOT EXISTS processed_webhooks (
+        message_id VARCHAR(100) PRIMARY KEY,
+        processed_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
       );
 
       CREATE INDEX IF NOT EXISTS idx_appointments_date ON appointments(date);
       CREATE INDEX IF NOT EXISTS idx_appointments_customer_phone ON appointments(customer_phone);
+      CREATE INDEX IF NOT EXISTS idx_outbox_status ON integration_outbox(status);
     `);
 
     client.release();
-    console.log("✅ PostgreSQL schema verified & ready.");
+    console.log("✅ PostgreSQL schema & migration tables verified & ready.");
   } catch (err) {
     console.error("❌ PostgreSQL initialization error:", err.message);
   }
@@ -75,5 +104,11 @@ module.exports = {
     const p = getPool();
     if (!p) return null;
     return p.query(text, params);
+  },
+
+  async getClient() {
+    const p = getPool();
+    if (!p) return null;
+    return p.connect();
   }
 };

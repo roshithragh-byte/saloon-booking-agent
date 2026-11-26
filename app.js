@@ -99,8 +99,42 @@ app.get('/', (req, res) => {
   });
 });
 
+// HTML escaping helper to prevent stored/reflected XSS in CRM dashboard
+function escapeHtml(str) {
+  if (str === null || str === undefined) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+// Basic Authentication middleware for Receptionist CRM
+function requireCrmAuth(req, res, next) {
+  const adminPassword = process.env.CRM_ADMIN_PASSWORD || 'naturals123';
+  const adminUser = process.env.CRM_ADMIN_USER || 'receptionist';
+
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Basic ')) {
+    res.setHeader('WWW-Authenticate', 'Basic realm="Salon Receptionist Portal"');
+    return res.status(401).send('Authentication required to access CRM.');
+  }
+
+  const credentials = Buffer.from(authHeader.split(' ')[1], 'base64').toString('ascii').split(':');
+  const user = credentials[0];
+  const pass = credentials[1];
+
+  if (user === adminUser && pass === adminPassword) {
+    return next();
+  }
+
+  res.setHeader('WWW-Authenticate', 'Basic realm="Salon Receptionist Portal"');
+  return res.status(401).send('Invalid CRM credentials.');
+}
+
 // Receptionist CRM Portal - Real-time appointments view
-app.get('/crm', async (req, res) => {
+app.get('/crm', requireCrmAuth, async (req, res) => {
   const appointments = await bookingStore.getAllAppointments();
   const services = bookingStore.getAllServices();
   const combos = bookingStore.getCombosList();
@@ -110,24 +144,24 @@ app.get('/crm', async (req, res) => {
   const rows = appointments.length > 0 
     ? appointments.map(app => `
       <tr style="border-bottom: 1px solid #e0e0e0; text-align: left;">
-        <td style="padding: 10px; font-weight: bold; color: #1a73e8;">${app.id}</td>
-        <td style="padding: 10px;">${app.customerName}</td>
-        <td style="padding: 10px;">${app.customerPhone}</td>
-        <td style="padding: 10px;">${app.serviceName}</td>
-        <td style="padding: 10px;">${app.date} @ ${app.time}</td>
-        <td style="padding: 10px;">${app.staffName}</td>
-        <td style="padding: 10px; font-weight: bold;">${app.price}</td>
-        <td style="padding: 10px;"><span style="background: #e6f4ea; color: #137333; padding: 4px 8px; border-radius: 4px; font-size: 12px;">${app.status}</span></td>
+        <td style="padding: 10px; font-weight: bold; color: #1a73e8;">${escapeHtml(app.id)}</td>
+        <td style="padding: 10px;">${escapeHtml(app.customerName)}</td>
+        <td style="padding: 10px;">${escapeHtml(app.customerPhone)}</td>
+        <td style="padding: 10px;">${escapeHtml(app.serviceName)}</td>
+        <td style="padding: 10px;">${escapeHtml(app.date)} @ ${escapeHtml(app.time)}</td>
+        <td style="padding: 10px;">${escapeHtml(app.staffName)}</td>
+        <td style="padding: 10px; font-weight: bold;">${escapeHtml(app.price)}</td>
+        <td style="padding: 10px;"><span style="background: #e6f4ea; color: #137333; padding: 4px 8px; border-radius: 4px; font-size: 12px;">${escapeHtml(app.status)}</span></td>
       </tr>
     `).join('')
     : `<tr><td colspan="8" style="padding: 20px; text-align: center; color: #666;">No appointments recorded yet.</td></tr>`;
 
   const serviceOptions = [
-    ...combos.map(c => `<option value="${c.name}">[Combo] ${c.name} (${c.priceFormatted})</option>`),
-    ...services.map(s => `<option value="${s.name}">${s.name} (${s.priceFormatted})</option>`)
+    ...combos.map(c => `<option value="${escapeHtml(c.name)}">[Combo] ${escapeHtml(c.name)} (${escapeHtml(c.priceFormatted)})</option>`),
+    ...services.map(s => `<option value="${escapeHtml(s.name)}">${escapeHtml(s.name)} (${escapeHtml(s.priceFormatted)})</option>`)
   ].join('');
 
-  const staffOptions = staff.map(st => `<option value="${st.name}">${st.name} (${st.title})</option>`).join('');
+  const staffOptions = staff.map(st => `<option value="${escapeHtml(st.name)}">${escapeHtml(st.name)} (${escapeHtml(st.title)})</option>`).join('');
 
   res.send(`
     <!DOCTYPE html>
@@ -223,7 +257,7 @@ app.get('/crm', async (req, res) => {
 });
 
 // Endpoint to book walk-in appointments from the CRM portal
-app.post('/crm/walkin', async (req, res) => {
+app.post('/crm/walkin', requireCrmAuth, async (req, res) => {
   const { customerName, customerPhone, service, staffName, date, time } = req.body;
   if (!customerName || !service || !date || !time) {
     return res.status(400).send("Missing required booking fields");
@@ -246,7 +280,7 @@ app.post('/crm/walkin', async (req, res) => {
 });
 
 // JSON API endpoint for external CRMs or dashboards
-app.get('/crm/appointments', async (req, res) => {
+app.get('/crm/appointments', requireCrmAuth, async (req, res) => {
   const all = await bookingStore.getAllAppointments();
   res.json({
     total: all.length,
@@ -289,22 +323,38 @@ app.get('/oauth2callback', async (req, res) => {
 // Check if all environment variables are set
 config.checkEnvVariables();
 
-// Verify that the callback came from Facebook.
+// Verify that the callback came from Meta Facebook.
+// Rejects missing signatures and uses timing-safe comparison to prevent timing attacks.
 function verifyRequestSignature(req, res, buf) {
-  let signature = req.headers["x-hub-signature-256"];
+  // Allow health checks or local testing when appSecret is deliberately empty
+  if (!config.appSecret) {
+    return;
+  }
+
+  const signature = req.headers["x-hub-signature-256"];
 
   if (!signature) {
-    console.warn(`Couldn't find "x-hub-signature-256" in headers.`);
-  } else {
-    let elements = signature.split("=");
-    let signatureHash = elements[1];
-    let expectedHash = crypto
-      .createHmac("sha256", config.appSecret)
-      .update(buf)
-      .digest("hex");
-    if (signatureHash != expectedHash) {
-      throw new Error("Couldn't validate the request signature.");
-    }
+    console.warn(`[Security] Rejected incoming webhook: missing x-hub-signature-256.`);
+    const err = new Error("Missing request signature header.");
+    err.status = 403;
+    throw err;
+  }
+
+  const elements = signature.split("=");
+  const signatureHash = elements[1];
+  const expectedHash = crypto
+    .createHmac("sha256", config.appSecret)
+    .update(buf)
+    .digest("hex");
+
+  const sigBuffer = Buffer.from(signatureHash || "", "utf8");
+  const expectedBuffer = Buffer.from(expectedHash, "utf8");
+
+  if (sigBuffer.length !== expectedBuffer.length || !crypto.timingSafeEqual(sigBuffer, expectedBuffer)) {
+    console.warn(`[Security] Rejected incoming webhook: signature verification failed.`);
+    const err = new Error("Invalid request signature.");
+    err.status = 403;
+    throw err;
   }
 }
 

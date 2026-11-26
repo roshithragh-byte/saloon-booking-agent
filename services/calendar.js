@@ -1,5 +1,6 @@
 /**
  * Google Calendar Integration Service for Salon Bookings
+ * Enforces fail-closed availability and explicit Asia/Kolkata timezone handling
  */
 "use strict";
 
@@ -11,6 +12,7 @@ const salonConfig = require('../data/salon-config.json');
 const CREDENTIALS_PATH = path.join(__dirname, '..', 'oauth-credentials.json');
 const TOKEN_PATH = path.join(__dirname, '..', 'token.json');
 const SCOPES = ['https://www.googleapis.com/auth/calendar'];
+const TIMEZONE_OFFSET_STR = "+05:30"; // Asia/Kolkata
 
 class GoogleCalendarService {
   constructor() {
@@ -21,7 +23,6 @@ class GoogleCalendarService {
   initClient() {
     let credentials = null;
 
-    // 1. Check environment variable first (for Cloud Run / production)
     if (process.env.GOOGLE_OAUTH_CREDENTIALS) {
       try {
         credentials = JSON.parse(process.env.GOOGLE_OAUTH_CREDENTIALS);
@@ -29,7 +30,6 @@ class GoogleCalendarService {
         console.error("Failed to parse GOOGLE_OAUTH_CREDENTIALS environment variable:", e.message);
       }
     } else if (fs.existsSync(CREDENTIALS_PATH)) {
-      // 2. Fallback to local file (for local dev)
       const content = fs.readFileSync(CREDENTIALS_PATH, 'utf8');
       credentials = JSON.parse(content);
     }
@@ -47,7 +47,6 @@ class GoogleCalendarService {
       redirect_uris[0]
     );
 
-    // Load Token: env var first, then token.json file
     let token = null;
     if (process.env.GOOGLE_TOKEN) {
       try {
@@ -101,22 +100,24 @@ class GoogleCalendarService {
   }
 
   /**
-   * Find busy slots on a given date (YYYY-MM-DD)
+   * Find busy slots on a given date (YYYY-MM-DD) strictly in Asia/Kolkata timezone
    */
   async getBusySlots(dateStr) {
-    if (!this.isAuthorized()) return [];
+    if (!this.isAuthorized()) {
+      throw new Error("Google Calendar not authorized");
+    }
 
     const calendar = this.getCalendar();
     const timeZone = salonConfig.timezone || 'Asia/Kolkata';
 
-    // Start of day to End of day in UTC
-    const timeMin = new Date(`${dateStr}T00:00:00`).toISOString();
-    const timeMax = new Date(`${dateStr}T23:59:59`).toISOString();
+    // Explicit ISO with Asia/Kolkata +05:30 timezone boundary
+    const timeMin = `${dateStr}T00:00:00${TIMEZONE_OFFSET_STR}`;
+    const timeMax = `${dateStr}T23:59:59${TIMEZONE_OFFSET_STR}`;
 
     const response = await calendar.freebusy.query({
       requestBody: {
-        timeMin,
-        timeMax,
+        timeMin: new Date(timeMin).toISOString(),
+        timeMax: new Date(timeMax).toISOString(),
         timeZone,
         items: [{ id: 'primary' }]
       }
@@ -127,22 +128,26 @@ class GoogleCalendarService {
   }
 
   /**
-   * Get available slots for a given date taking into account salon hours and existing calendar bookings
+   * Get available slots for a given date taking into account service duration.
+   * Fail-Closed Policy: Throws if Calendar is unavailable or errors.
    */
   async getAvailableSlots(dateStr, durationMin = 45) {
-    const defaultSlots = ["10:00 AM", "11:30 AM", "01:30 PM", "03:00 PM", "04:30 PM", "06:00 PM", "07:00 PM"];
+    const candidateSlots = ["10:00 AM", "11:30 AM", "01:30 PM", "03:00 PM", "04:30 PM", "06:00 PM", "07:00 PM"];
     
+    // Fail closed if not connected
     if (!this.isAuthorized()) {
-      return defaultSlots;
+      return { available: false, error: "CALENDAR_NOT_AUTHORIZED", slots: [] };
     }
 
     try {
       const busySlots = await this.getBusySlots(dateStr);
-      if (!busySlots || busySlots.length === 0) return defaultSlots;
+      if (!busySlots || busySlots.length === 0) {
+        return { available: true, slots: candidateSlots };
+      }
 
       // Filter slots that overlap with any busy event using the exact service duration
-      return defaultSlots.filter(slot => {
-        const slotTime = this.#parseSlotToDate(dateStr, slot);
+      const validSlots = candidateSlots.filter(slot => {
+        const slotTime = this.parseSlotToDate(dateStr, slot);
         const slotEnd = new Date(slotTime.getTime() + durationMin * 60 * 1000);
 
         const overlaps = busySlots.some(b => {
@@ -153,33 +158,55 @@ class GoogleCalendarService {
 
         return !overlaps;
       });
+
+      return { available: true, slots: validSlots };
     } catch (err) {
-      console.error("Error checking calendar busy status:", err.message);
-      return defaultSlots;
+      console.error("Fail-Closed: Error checking calendar busy status:", err.message);
+      return { available: false, error: err.message, slots: [] };
     }
   }
 
-  #parseSlotToDate(dateStr, slotStr) {
-    // E.g. "2026-11-24", "10:00 AM" or "01:30 PM"
-    const [time, modifier] = slotStr.split(' ');
-    let [hours, minutes] = time.split(':').map(Number);
-    if (modifier === 'PM' && hours < 12) hours += 12;
-    if (modifier === 'AM' && hours === 12) hours = 0;
+  /**
+   * Check if a specific time window [start, start + durationMin] is strictly available
+   */
+  async isWindowAvailable(dateStr, timeStr, durationMin = 45) {
+    if (!this.isAuthorized()) return false;
+    try {
+      const busySlots = await this.getBusySlots(dateStr);
+      const slotStart = this.parseSlotToDate(dateStr, timeStr);
+      const slotEnd = new Date(slotStart.getTime() + durationMin * 60 * 1000);
 
-    const date = new Date(dateStr);
-    date.setHours(hours, minutes, 0, 0);
-    return date;
+      const overlaps = busySlots.some(b => {
+        const bStart = new Date(b.start);
+        const bEnd = new Date(b.end);
+        return (slotStart < bEnd && slotEnd > bStart);
+      });
+
+      return !overlaps;
+    } catch (err) {
+      console.error("Window availability check failed:", err.message);
+      return false;
+    }
+  }
+
+  parseSlotToDate(dateStr, slotStr) {
+    const [time, modifier] = slotStr.trim().split(/\s+/);
+    let [hours, minutes] = time.split(':').map(Number);
+    if (modifier && modifier.toUpperCase() === 'PM' && hours < 12) hours += 12;
+    if (modifier && modifier.toUpperCase() === 'AM' && hours === 12) hours = 0;
+
+    const dateFormatted = `${dateStr}T${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:00${TIMEZONE_OFFSET_STR}`;
+    return new Date(dateFormatted);
   }
 
   /**
-   * Create an event on the Google Calendar
+   * Create an event on the Google Calendar with IST timezone
    */
   async createCalendarEvent(booking) {
     const calendar = this.getCalendar();
     const timeZone = salonConfig.timezone || 'Asia/Kolkata';
 
-    // Parse start and end time
-    const startDateTime = this.#parseSlotToDate(booking.date, booking.time);
+    const startDateTime = this.parseSlotToDate(booking.date, booking.time);
     const durationMin = booking.durationMin || 45;
     const endDateTime = new Date(startDateTime.getTime() + durationMin * 60 * 1000);
 

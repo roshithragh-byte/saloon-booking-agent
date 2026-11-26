@@ -86,7 +86,7 @@ async function syncToSalonBackend(record) {
       notes: `Booked via WhatsApp Aura Agent (${record.id || 'N/A'}) - ${record.serviceName} [Staff: ${record.staffName || 'Any'}]`
     };
 
-    const idempotencyKey = `wa_${record.id || Date.now()}_${Math.random().toString(36).substring(7)}`;
+    const idempotencyKey = `wa_sync_${record.id}`;
 
     const response = await fetch(`${BACKEND_BASE_URL}/salons/${SALON_SLUG}/bookings`, {
       method: 'POST',

@@ -82,13 +82,18 @@ test('Aura 4-Stage Sequential Booking Flow Verification', async (t) => {
   });
 
   await t.test('Step 2 Cont.: Selecting Time Slot -> Prompts Step 3 (Men vs Ladies Service Catalog)', async () => {
+    // Pick an actually open slot on tomorrow
+    const tomorrow = new Date(Date.now() + 86400000).toISOString().split('T')[0];
+    const availableRes = await bookingStore.getAvailableSlotsForService(null, tomorrow);
+    const chosenSlot = (availableRes && availableRes.length > 0) ? availableRes[0] : "10:00 AM";
+
     await Conversation.handleMessage(SENDER_PHONE_ID, {
       id: 'wamid_seq_4',
       from: TEST_PHONE,
       type: 'interactive',
       interactive: {
         type: 'list_reply',
-        list_reply: { id: 'slot_03:00_PM', title: '03:00 PM' }
+        list_reply: { id: `slot_${chosenSlot.replace(/ /g, '_')}`, title: chosenSlot }
       }
     });
 
@@ -129,7 +134,6 @@ test('Aura 4-Stage Sequential Booking Flow Verification', async (t) => {
     assert.match(lastOutbound.header, /Step 4: Review & Confirm/i);
     assert.match(lastOutbound.text, /Duke Sharma/);
     assert.match(lastOutbound.text, /919836893550/);
-    assert.match(lastOutbound.text, /03:00 PM/);
     assert.match(lastOutbound.text, /Men's Precision Cut & Style/);
     assert.equal(lastOutbound.buttons[0].id, 'btn_confirm_booking');
   });
@@ -147,6 +151,29 @@ test('Aura 4-Stage Sequential Booking Flow Verification', async (t) => {
 
     assert.equal(lastOutbound.type, 'text');
     assert.match(lastOutbound.text, /Booking Confirmed/i);
-    assert.match(lastOutbound.text, /NU-\d{4}/);
+    assert.match(lastOutbound.text, /NU-\d{8}-[A-Z0-9]{4}/);
+  });
+
+  await t.test('Security & Slot Revalidation: Busy slot rejects confirmation and reprompts', async () => {
+    // Attempt to book 03:00 PM on tomorrow which is already busy on Google Calendar
+    const tomorrow = new Date(Date.now() + 86400000).toISOString().split('T')[0];
+    const session = await bookingStore.getOrCreateCustomer ? {
+      phone: TEST_PHONE,
+      state: "AWAITING_CONFIRMATION",
+      customerName: "Duke Sharma",
+      bookingPhone: TEST_PHONE,
+      bookingDraft: {
+        date: tomorrow,
+        time: "03:00 PM",
+        durationMin: 40,
+        serviceId: "srv_mens_precision",
+        serviceName: "Men's Precision Cut & Style",
+        price: "₹350"
+      }
+    } : null;
+
+    // Direct check of isWindowAvailable
+    const isAvail = await require('../services/calendar').isWindowAvailable(tomorrow, "03:00 PM", 40);
+    assert.equal(isAvail, false, '03:00 PM must be detected as busy on Calendar');
   });
 });

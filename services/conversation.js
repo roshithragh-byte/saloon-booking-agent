@@ -12,39 +12,89 @@ const GraphApi = require('./graph-api');
 const Message = require('./message');
 const SalonAIAgent = require('./ai-agent');
 const bookingStore = require('./booking-store');
+const calendarService = require('./calendar');
 
 // Deduplication cache
 const processedMessageIds = new Set();
 
-// Persistent session states: phone -> Session Object
+// In-memory cache for fast access, backed by PostgreSQL
 const userSessions = new Map();
 
 async function getOrCreateSession(phone, senderProfileName) {
-  if (!userSessions.has(phone)) {
-    const customer = await bookingStore.getOrCreateCustomer(phone, senderProfileName);
-    const initialName = (customer && customer.name !== "Valued Guest") 
-      ? customer.name 
-      : (senderProfileName || null);
-
-    userSessions.set(phone, {
-      phone,
-      state: initialName ? "AWAITING_DATE" : "AWAITING_NAME",
-      customerName: initialName,
-      bookingPhone: phone,
-      gender: null,
-      history: [],
-      bookingDraft: {
-        serviceId: null,
-        serviceName: null,
-        durationMin: null,
-        price: null,
-        date: null,
-        time: null,
-        staffName: null
-      }
-    });
+  if (userSessions.has(phone)) {
+    return userSessions.get(phone);
   }
-  return userSessions.get(phone);
+
+  // Attempt to restore session from PostgreSQL
+  if (bookingStore.getDb()) {
+    try {
+      const res = await bookingStore.getDb().query(
+        `SELECT state, data FROM conversation_sessions WHERE phone = $1`,
+        [phone]
+      );
+      if (res && res.rows && res.rows.length > 0) {
+        const row = res.rows[0];
+        const loadedSession = {
+          phone,
+          state: row.state,
+          ...row.data
+        };
+        userSessions.set(phone, loadedSession);
+        return loadedSession;
+      }
+    } catch (err) {
+      console.error("Error reading session from DB:", err.message);
+    }
+  }
+
+  const customer = await bookingStore.getOrCreateCustomer(phone, senderProfileName);
+  const initialName = (customer && customer.name !== "Valued Guest") 
+    ? customer.name 
+    : (senderProfileName || null);
+
+  const newSession = {
+    phone,
+    state: initialName ? "AWAITING_DATE" : "AWAITING_NAME",
+    customerName: initialName,
+    bookingPhone: phone,
+    gender: null,
+    history: [],
+    bookingDraft: {
+      serviceId: null,
+      serviceName: null,
+      durationMin: null,
+      price: null,
+      date: null,
+      time: null,
+      staffName: null
+    }
+  };
+
+  userSessions.set(phone, newSession);
+  await saveSession(newSession);
+  return newSession;
+}
+
+async function saveSession(session) {
+  if (!session || !session.phone) return;
+  userSessions.set(session.phone, session);
+
+  if (bookingStore.getDb()) {
+    try {
+      const { phone, state, ...data } = session;
+      await bookingStore.getDb().query(
+        `INSERT INTO conversation_sessions (phone, state, data, updated_at)
+         VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
+         ON CONFLICT (phone) DO UPDATE
+         SET state = EXCLUDED.state,
+             data = EXCLUDED.data,
+             updated_at = CURRENT_TIMESTAMP`,
+        [phone, state, JSON.stringify(data)]
+      );
+    } catch (err) {
+      console.error("Error persisting session to DB:", err.message);
+    }
+  }
 }
 
 function updateHistory(session, userText, modelReply) {
@@ -307,6 +357,8 @@ module.exports = class Conversation {
         customerPhone,
         "I'm sorry, I encountered a temporary issue. Please send 'hi' to refresh our session."
       );
+    } finally {
+      await saveSession(session);
     }
   }
 
@@ -453,6 +505,24 @@ module.exports = class Conversation {
     }
 
     session.state = "BOOKING_IN_PROGRESS";
+
+    // P0 Finding 1: Re-validate slot availability for exact duration before confirmation
+    const isStillAvailable = await calendarService.isWindowAvailable(
+      draft.date,
+      draft.time,
+      draft.durationMin || 45
+    );
+
+    if (!isStillAvailable) {
+      session.state = "AWAITING_TIME_SLOT";
+      await GraphApi.sendTextMessage(
+        messageId,
+        senderPhoneNumberId,
+        customerPhone,
+        `⚠️ Sorry! The ${draft.time} slot on ${draft.date} was just booked or is no longer available for a ${draft.durationMin}-minute session. Please choose another time:`
+      );
+      return await this.#sendTimeSlotMenu(senderPhoneNumberId, customerPhone, session, messageId);
+    }
 
     // Atomically create booking and sync with Google Calendar & PostgreSQL
     const confirmedBooking = await bookingStore.createBooking({
