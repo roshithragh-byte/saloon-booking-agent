@@ -51,42 +51,49 @@ module.exports = {
     const relevantServices = this.getAllServices(isMen ? "men" : "women");
 
     const sections = [];
+    let remainingBudget = 10; // WhatsApp Cloud API limit: total across all sections <= 10
 
-    // Section 1: Signature Combos
+    // Section 1: Signature Combos (up to 3 combos)
     if (relevantCombos.length > 0) {
+      const comboRows = relevantCombos.slice(0, 3).map(c => ({
+        id: c.id,
+        title: c.name.substring(0, 24),
+        description: `${c.priceFormatted} · ${c.durationMin}m · ${c.savings}`
+      }));
       sections.push({
-        title: isMen ? "Men's Value Combos" : "Ladies Signature Combos",
-        rows: relevantCombos.slice(0, 5).map(c => ({
-          id: c.id,
-          title: c.name.substring(0, 24),
-          description: `${c.priceFormatted} · ${c.durationMin}m · ${c.savings}`
-        }))
+        title: (isMen ? "Value Combos" : "Signature Combos").substring(0, 24),
+        rows: comboRows
       });
+      remainingBudget -= comboRows.length;
     }
 
-    // Section 2: Hair & Grooming
+    // Section 2: Popular Hair Cuts & Styling (up to 4 items)
     const hair = relevantServices.filter(s => s.category.includes("Hair"));
-    if (hair.length > 0) {
+    if (hair.length > 0 && remainingBudget > 0) {
+      const hairCount = Math.min(hair.length, 4, remainingBudget);
+      const hairRows = hair.slice(0, hairCount).map(s => ({
+        id: s.id,
+        title: s.name.substring(0, 24),
+        description: `${s.priceFormatted} · ${s.durationMin} mins`
+      }));
       sections.push({
-        title: isMen ? "Men's Cuts & Beard" : "Ladies Hair & Styling",
-        rows: hair.slice(0, 8).map(s => ({
-          id: s.id,
-          title: s.name.substring(0, 24),
-          description: `${s.priceFormatted} · ${s.durationMin} mins`
-        }))
+        title: (isMen ? "Cuts & Grooming" : "Hair & Styling").substring(0, 24),
+        rows: hairRows
       });
+      remainingBudget -= hairRows.length;
     }
 
-    // Section 3: Skin, Hydra & Spas
+    // Section 3: Facials, Spas & Care (fill remaining slots up to 10 total)
     const skinAndSpa = relevantServices.filter(s => s.category.includes("Skin") || s.category.includes("Spa") || s.category.includes("Hands") || s.category.includes("Color"));
-    if (skinAndSpa.length > 0) {
+    if (skinAndSpa.length > 0 && remainingBudget > 0) {
+      const spaRows = skinAndSpa.slice(0, remainingBudget).map(s => ({
+        id: s.id,
+        title: s.name.substring(0, 24),
+        description: `${s.priceFormatted} · ${s.durationMin} mins`
+      }));
       sections.push({
-        title: "Facials, Spas & Skin",
-        rows: skinAndSpa.slice(0, 8).map(s => ({
-          id: s.id,
-          title: s.name.substring(0, 24),
-          description: `${s.priceFormatted} · ${s.durationMin} mins`
-        }))
+        title: "Facials & Spa Care".substring(0, 24),
+        rows: spaRows
       });
     }
 

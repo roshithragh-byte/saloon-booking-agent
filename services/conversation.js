@@ -206,9 +206,35 @@ module.exports = class Conversation {
       }
 
       // -------------------------------------------------------------------
-      // 2. CHECK EXISTING APPOINTMENTS INTENT
+      // 2. CHECK EXISTING APPOINTMENTS OR RESET FLOW ON GREETING
       // -------------------------------------------------------------------
       const lower = userPrompt.toLowerCase();
+      const isGreeting = ["hi", "hello", "hey", "hola", "namaste", "good morning", "good evening"].includes(lower);
+
+      if (isGreeting) {
+        if (!session.customerName || session.customerName === "Valued Guest") {
+          session.state = "AWAITING_NAME";
+          await GraphApi.sendTextMessage(
+            message.id,
+            senderPhoneNumberId,
+            customerPhone,
+            "Welcome to *Natural’s Unisex Salon, Kottakkal*! ✨\n\nTo get started with your reservation, may I have your **Full Name**?"
+          );
+          return;
+        } else {
+          // Returning recognized guest: reset draft to Step 2 so they start fresh
+          session.state = "AWAITING_DATE";
+          session.bookingDraft = { serviceId: null, serviceName: null, date: null, time: null };
+          await GraphApi.sendTextMessage(
+            message.id,
+            senderPhoneNumberId,
+            customerPhone,
+            `Welcome back, *${session.customerName}*! ✨\nWe'll confirm your reservation for **+${customerPhone}**.`
+          );
+          return await this.#promptDateSelection(senderPhoneNumberId, customerPhone, session, message.id);
+        }
+      }
+
       if (
         lower.includes("appointment") && 
         (lower.includes("any") || lower.includes("my") || lower.includes("upcoming") || lower.includes("check") || lower.includes("status"))
@@ -242,17 +268,6 @@ module.exports = class Conversation {
       // 3. STEP 1: IDENTITY & CONTACT CONFIRMATION
       // -------------------------------------------------------------------
       if (session.state === "AWAITING_NAME" || !session.customerName) {
-        // If message is just a greeting like "hi", ask for their name
-        if (["hi", "hello", "hey", "hola", "namaste", "good morning", "good evening"].includes(lower)) {
-          await GraphApi.sendTextMessage(
-            message.id,
-            senderPhoneNumberId,
-            customerPhone,
-            "Welcome to *Natural’s Unisex Salon, Kottakkal*! ✨\n\nTo get started with your reservation, may I have your **Full Name**?"
-          );
-          return;
-        }
-
         // Clean user input as their name
         const cleanName = userPrompt.replace(/[^\w\s]/gi, '').trim();
         if (cleanName.length >= 2) {
